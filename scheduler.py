@@ -74,6 +74,21 @@ RECENT_WINDOW_DAYS = 14
 # Politeness delay between Fandango/Letterboxd/Box Office Mojo requests within a run.
 REQUEST_DELAY_SECONDS = 0.3
 
+# Caps how many due films get actually processed (matched/checked) in a single
+# run. Without this, a large batch of simultaneously-due films - e.g. every
+# legacy film's first-ever check right after the 2-year cutoff was removed, all
+# landing with no next_check_at and so all "due" at once (see is_due) - can run
+# the deployed function past its timeout (modal_app.py's 600s). A never-checked
+# retired film is especially expensive: with no current showtimes, checking it
+# walks the full near-term window (up to 14 sequential Fandango requests -
+# see fandango.check_ticket_status) before giving up on each one. This cap
+# keeps every run's total work bounded and fast regardless of backlog size, so
+# a run always finishes and its progress is always persisted (rather than
+# risking work that a hard timeout kills before it's saved) - the rest of a
+# large backlog just gets picked up on the next run(s) instead, draining
+# gradually rather than trying to clear it all in one shot.
+MAX_PROCESSED_PER_RUN = 20
+
 
 def compute_tier(release_date, today=None, is_hype=False):
     if is_hype:
@@ -131,6 +146,7 @@ def run(username, zip_code, hype_list_url=None, db_path=state.DB_PATH):
 
     checked = []
     alerts = []
+    processed = 0
 
     for row in conn.execute("SELECT * FROM films"):
         film = Film(slug=row["slug"], title=row["title"], year=row["year"], url=row["url"])
@@ -139,6 +155,13 @@ def run(username, zip_code, hype_list_url=None, db_path=state.DB_PATH):
         status_row = state.get_ticket_status(conn, film.slug)
         if status_row and not is_due(status_row.next_check_at, now):
             continue  # not due - skip without even touching matching
+
+        # Hype films are exempt from the cap - "checked every run" is the
+        # whole point of Hype, and the list is meant to stay small/curated
+        # anyway, so it's never the source of a large backlog.
+        if not is_hype and processed >= MAX_PROCESSED_PER_RUN:
+            continue  # backlog too large for one run - picked up on a later run instead
+        processed += 1
 
         time.sleep(REQUEST_DELAY_SECONDS)
 

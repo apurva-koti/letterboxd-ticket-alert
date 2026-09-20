@@ -134,6 +134,61 @@ def test_run_skips_unmatched_films_hot_films_alert_retired_films_still_checked_o
     assert tiers["digger-2026"] == scheduler.TIER_HOT
 
 
+def test_run_caps_films_processed_per_run(monkeypatch, tmp_path):
+    """Regression test for a real production incident: removing the 2-year
+    cutoff meant every previously-excluded legacy film became due at once (no
+    ticket_status row yet - see is_due), and a large batch processed in one
+    run blew past Modal's 600s function timeout, which then looped since the
+    same backlog was still due on the next run too. MAX_PROCESSED_PER_RUN
+    bounds how much work a single run does so it always finishes (and
+    persists progress) regardless of backlog size - the excess just waits for
+    a later run instead."""
+    films = [make_film(title=f"Film {i}", year=2020, slug=f"film-{i}") for i in range(scheduler.MAX_PROCESSED_PER_RUN + 5)]
+    monkeypatch.setattr(letterboxd, "get_watchlist", lambda username, **kw: films)
+    monkeypatch.setattr(fandango, "new_session", lambda: None)
+    monkeypatch.setattr(scheduler.time, "sleep", lambda s: None)
+
+    attempted = []
+
+    def counting_get_or_match(conn, session, film, is_hype=False):
+        attempted.append(film.slug)
+        return make_match(letterboxd_slug=film.slug, fandango_id=None)
+
+    monkeypatch.setattr(ticket_checker, "get_or_match", counting_get_or_match)
+
+    db_path = str(tmp_path / "test.db")
+    scheduler.run("fake_user", "94158", db_path=db_path)
+
+    assert len(attempted) == scheduler.MAX_PROCESSED_PER_RUN  # not all of the backlog in one run
+
+
+def test_run_cap_does_not_apply_to_hype_films(monkeypatch, tmp_path):
+    """A Hype film must still be processed every run even if the cap has
+    already been reached by unrelated due watchlist films - Hype's whole
+    point is "checked every run, no matter what"."""
+    watchlist_films = [
+        make_film(title=f"Film {i}", year=2020, slug=f"film-{i}") for i in range(scheduler.MAX_PROCESSED_PER_RUN)
+    ]
+    hype_films = [make_film(title="Dune: Part Three", year=2026, slug="dune-part-three")]
+
+    attempted = []
+
+    def counting_get_or_match(conn, session, film, is_hype=False):
+        attempted.append((film.slug, is_hype))
+        return make_match(letterboxd_slug=film.slug, fandango_id=None)
+
+    monkeypatch.setattr(letterboxd, "get_watchlist", lambda username, **kw: watchlist_films)
+    monkeypatch.setattr(letterboxd, "get_list", lambda url, **kw: hype_films)
+    monkeypatch.setattr(fandango, "new_session", lambda: None)
+    monkeypatch.setattr(ticket_checker, "get_or_match", counting_get_or_match)
+    monkeypatch.setattr(scheduler.time, "sleep", lambda s: None)
+
+    db_path = str(tmp_path / "test.db")
+    scheduler.run("fake_user", "94158", hype_list_url="https://letterboxd.com/x/list/hype/", db_path=db_path)
+
+    assert ("dune-part-three", True) in attempted
+
+
 def test_run_second_pass_immediately_after_finds_nothing_due(monkeypatch, tmp_path):
     films = [make_film(title="Your Mother x3", year=2026, slug="your-mother-x3")]
     monkeypatch.setattr(letterboxd, "get_watchlist", lambda username, **kw: films)
