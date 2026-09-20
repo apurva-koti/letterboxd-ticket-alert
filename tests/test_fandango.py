@@ -181,21 +181,41 @@ def test_check_ticket_status_skips_release_window_when_release_is_near_term():
     assert len(calls) == 14  # only the near-term window - no extra release-window dates
 
 
-def test_check_ticket_status_skips_a_date_with_malformed_json_instead_of_crashing():
-    """Real production incident: Fandango occasionally returns a 200 with an
-    empty/non-JSON body for one date. That date should be skipped, not crash
-    the whole check - later dates in the window still get scanned normally."""
+def test_check_ticket_status_skips_a_date_still_malformed_after_retries(monkeypatch):
+    """Real production incident: Fandango (via Akamai bot-management) can
+    serve an HTML block page instead of JSON. If a date is STILL malformed
+    after MALFORMED_RESPONSE_RETRIES retries, it's skipped (not crashed on) -
+    later dates in the window still get scanned normally."""
+    monkeypatch.setattr(fandango.time, "sleep", lambda s: None)
+
     responses = iter(
-        [
-            _FakeBadJsonResponse(),  # day 0: malformed
-            _FakeJsonResponse(_showtime_response([_theater("Alamo Drafthouse", [{"type": "available", "isSoldOut": False}])])),  # day 1: fine
-        ]
+        [_FakeBadJsonResponse()] * (fandango.MALFORMED_RESPONSE_RETRIES + 1)  # day 0: bad every attempt
+        + [_FakeJsonResponse(_showtime_response([_theater("Alamo Drafthouse", [{"type": "available", "isSoldOut": False}])]))]  # day 1: fine
     )
     session = FakeSession(lambda url, params: next(responses))
 
     result = fandango.check_ticket_status(session, "1", "slug", "94158", days_ahead=2)
     assert result.status == fandango.STATUS_ON_SALE
     assert result.on_sale_theaters == ["Alamo Drafthouse"]
+
+
+def test_check_ticket_status_retries_a_blocked_response_and_succeeds(monkeypatch):
+    """The actual real-world case this was built for: one blocked/malformed
+    response, then a clean one on retry for the SAME date - the retry has to
+    actually recover the real data, not just move on to the next date."""
+    monkeypatch.setattr(fandango.time, "sleep", lambda s: None)
+
+    responses = iter(
+        [
+            _FakeBadJsonResponse(),  # first attempt at day 0: blocked
+            _FakeJsonResponse(_showtime_response([_theater("Alamo Drafthouse", [{"type": "available", "isSoldOut": False}])])),  # retry: real data
+        ]
+    )
+    session = FakeSession(lambda url, params: next(responses))
+
+    result = fandango.check_ticket_status(session, "1", "slug", "94158", days_ahead=2)
+    assert result.status == fandango.STATUS_ON_SALE
+    assert result.date == date.today().isoformat()  # found on day 0's retry, not day 1
 
 
 class _FakeJsonResponse:

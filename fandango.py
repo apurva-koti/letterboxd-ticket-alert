@@ -11,6 +11,7 @@ logged-in account, just a same-session-looking request.
 
 import json
 import re
+import time
 import unicodedata
 from datetime import date, timedelta
 from difflib import SequenceMatcher
@@ -190,23 +191,38 @@ RELEASE_WINDOW_BEFORE_DAYS = 7
 RELEASE_WINDOW_AFTER_DAYS = 7
 
 
+MALFORMED_RESPONSE_RETRIES = 2
+MALFORMED_RESPONSE_RETRY_DELAY_SECONDS = 1.5
+
+
 def _showtime_grouping(session, fandango_id, zip_code, check_date, referer):
-    """One date's raw response, or None for "no usable data this date" -
-    covers both a clean {"hasShowtimes": false} and Fandango's occasional
-    200-with-empty-body flakiness (seen in production), which is otherwise
-    indistinguishable from "nothing scheduled" as far as this caller's
-    concerned."""
-    resp = session.get(
-        f"{BASE_URL}/napi/theaterShowtimeGroupings/{fandango_id}/{check_date}",
-        params={"zip": zip_code, "isdesktop": "true", "limit": 5},
-        headers={"Accept": "application/json", "Referer": referer},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    try:
-        data = resp.json()
-    except ValueError:
-        return None
+    """One date's raw response, or None for "no usable data this date".
+
+    Retries a non-JSON 200 response before giving up on it. Seen for real in
+    production: Fandango (via Akamai's bot-management) can serve an HTML "A
+    Message To Our Fans" block page instead of the real API response,
+    apparently probabilistic/reputation-based rather than a hard IP ban - a
+    request that got blocked once succeeded cleanly moments later from the
+    same environment with no other change. Silently treating a blocked
+    response as "no data" would be worse than the thing this project exists
+    to prevent: it can't tell "genuinely nothing on sale" from "we got
+    blocked and never actually found out" without retrying first.
+    """
+    url = f"{BASE_URL}/napi/theaterShowtimeGroupings/{fandango_id}/{check_date}"
+    params = {"zip": zip_code, "isdesktop": "true", "limit": 5}
+    headers = {"Accept": "application/json", "Referer": referer}
+
+    for attempt in range(MALFORMED_RESPONSE_RETRIES + 1):
+        resp = session.get(url, params=params, headers=headers, timeout=15)
+        resp.raise_for_status()
+        try:
+            data = resp.json()
+            break
+        except ValueError:
+            if attempt < MALFORMED_RESPONSE_RETRIES:
+                time.sleep(MALFORMED_RESPONSE_RETRY_DELAY_SECONDS)
+                continue
+            return None  # still malformed after retries - genuinely give up on this date
     return data if data.get("hasShowtimes") else None
 
 
