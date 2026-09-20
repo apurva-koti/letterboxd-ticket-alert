@@ -137,6 +137,23 @@ def test_check_ticket_status_mixed_theaters_bucket_separately():
     assert result.showtimes_only_theaters == ["Announced Only Cinema"]
 
 
+def test_check_ticket_status_skips_a_date_with_malformed_json_instead_of_crashing():
+    """Real production incident: Fandango occasionally returns a 200 with an
+    empty/non-JSON body for one date. That date should be skipped, not crash
+    the whole check - later dates in the window still get scanned normally."""
+    responses = iter(
+        [
+            _FakeBadJsonResponse(),  # day 0: malformed
+            _FakeJsonResponse(_showtime_response([_theater("Alamo Drafthouse", [{"type": "available", "isSoldOut": False}])])),  # day 1: fine
+        ]
+    )
+    session = FakeSession(lambda url, params: next(responses))
+
+    result = fandango.check_ticket_status(session, "1", "slug", "94158", days_ahead=2)
+    assert result.status == fandango.STATUS_ON_SALE
+    assert result.on_sale_theaters == ["Alamo Drafthouse"]
+
+
 class _FakeJsonResponse:
     def __init__(self, data):
         self._data = data
@@ -147,3 +164,18 @@ class _FakeJsonResponse:
 
     def json(self):
         return self._data
+
+
+class _FakeBadJsonResponse:
+    """A 200 response whose body isn't valid JSON - reproduces the real
+    empty-body case without needing an actual malformed-JSON fixture."""
+
+    status_code = 200
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        import json
+
+        json.loads("")  # raises json.JSONDecodeError, a ValueError subclass

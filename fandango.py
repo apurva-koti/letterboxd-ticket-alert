@@ -212,7 +212,14 @@ def check_ticket_status(session, fandango_id, fandango_slug, zip_code, days_ahea
             timeout=15,
         )
         resp.raise_for_status()
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            # Seen in production: an occasional 200 with an empty/non-JSON
+            # body for one date - Fandango's own flakiness, not something
+            # worth failing the whole check over. Treat this one date as "no
+            # data" and keep scanning the rest of the window.
+            continue
 
         if not data.get("hasShowtimes"):
             continue
