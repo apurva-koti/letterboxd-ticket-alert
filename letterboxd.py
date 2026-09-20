@@ -152,6 +152,46 @@ def get_watchlist(username, delay=0.5, max_pages=None):
     return films
 
 
+def get_list(list_url, delay=0.5, max_pages=None):
+    """Fetches all films in a Letterboxd list - same grid/LazyPoster markup as
+    the watchlist, just a different URL family, so this reuses _parse_page.
+
+    list_url can be a plain public list URL or a private list's share-token
+    URL (https://letterboxd.com/<user>/list/<slug>/share/<token>/, from a
+    boxd.it short link). Verified by hand: a share-token URL only serves its
+    first page - appending /page/N/ 403s there (not 404), even though the
+    same pattern works fine for a plain public list or the watchlist. Both
+    403 and 404 are treated as "no more pages" here, so a share-linked list
+    just silently caps at one page's worth of films (~28) rather than
+    crashing - fine for a small curated list, but worth knowing about if
+    "Hype" (or similar) ever grows past that.
+    """
+    films = []
+    page = 1
+    base = list_url.rstrip("/")
+    while True:
+        # Page 1 has to be the bare URL, not .../page/1/ - confirmed by hand
+        # that a share-token URL 403s on /page/1/ even though the identical
+        # content is served at the bare URL. Only later pages use /page/N/.
+        url = f"{base}/" if page == 1 else f"{base}/page/{page}/"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        if resp.status_code in (403, 404):
+            break
+        resp.raise_for_status()
+
+        page_films = _parse_page(resp.text)
+        if not page_films:
+            break
+
+        films.extend(page_films)
+        page += 1
+        if max_pages and page > max_pages:
+            break
+        time.sleep(delay)
+
+    return films
+
+
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         print(f"Usage: python3 {sys.argv[0]} <letterboxd_username>")

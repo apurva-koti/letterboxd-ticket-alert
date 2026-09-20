@@ -24,12 +24,18 @@ MATCH_RETRY_INTERVAL = timedelta(days=1)
 DOCUMENTARY_GENRE = "documentary"
 
 
-def get_or_match(conn, session, film):
+def get_or_match(conn, session, film, is_hype=False):
     """Looks up a film's Fandango match from the DB, or searches for one if it's
     never been attempted or the last attempt (more than MATCH_RETRY_INTERVAL ago)
     found nothing (catalog entries can appear later, e.g. as a release date
     approaches). A film already marked excluded_reason (e.g. "documentary") is
-    never retried - that's a permanent scope decision, not a temporary miss.
+    never retried - that's a permanent scope decision, not a temporary miss -
+    UNLESS is_hype is now True, which overrides a past exclusion and skips a
+    fresh one: being on the Hype list is a stronger, explicit signal than the
+    coarse documentary heuristic. is_hype also bypasses MATCH_RETRY_INTERVAL
+    entirely, re-attempting a still-unmatched film on every call - the whole
+    point of Hype is catching a Fandango listing (or release date) the moment
+    it appears, not waiting up to a day to look again.
 
     Before attempting a Fandango match, this fetches the film's Letterboxd page
     once (get_film_info) for three things at once: its genres (to exclude
@@ -42,12 +48,12 @@ def get_or_match(conn, session, film):
     """
     existing = state.get_match(conn, film.slug)
     if existing:
-        if existing.excluded_reason:
+        if existing.excluded_reason and not is_hype:
             return existing  # permanently out of scope, never retried
         if existing.fandango_id:
             return existing
         last_checked = datetime.fromisoformat(existing.checked_at)
-        if datetime.now(timezone.utc) - last_checked < MATCH_RETRY_INTERVAL:
+        if not is_hype and datetime.now(timezone.utc) - last_checked < MATCH_RETRY_INTERVAL:
             return existing  # still unmatched, not due for a retry yet
 
     letterboxd_info = None
@@ -56,7 +62,7 @@ def get_or_match(conn, session, film):
     except Exception:
         pass  # proceed without it - matching still works, just with less to go on
 
-    if letterboxd_info and DOCUMENTARY_GENRE in letterboxd_info.genres:
+    if letterboxd_info and DOCUMENTARY_GENRE in letterboxd_info.genres and not is_hype:
         state.save_match(conn, film.slug, None, None, None, None, excluded_reason=DOCUMENTARY_GENRE)
         return state.get_match(conn, film.slug)
 

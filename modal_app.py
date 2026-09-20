@@ -19,8 +19,6 @@ import time
 
 import modal
 
-USERNAME = "apurvakoti"
-ZIP_CODE = "94158"
 DB_PATH = "/data/state.db"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -32,7 +30,15 @@ image = (
     modal.Image.debian_slim()
     .uv_pip_install("requests", "beautifulsoup4")
     .add_local_python_source(
-        "letterboxd", "fandango", "boxofficemojo", "state", "ticket_checker", "scheduler", "models", "email_alert"
+        "letterboxd",
+        "fandango",
+        "boxofficemojo",
+        "state",
+        "ticket_checker",
+        "scheduler",
+        "models",
+        "email_alert",
+        "config",
     )
 )
 
@@ -40,25 +46,32 @@ volume = modal.Volume.from_name("letterboxd-ticket-alert-db", create_if_missing=
 
 # Created via: modal secret create gmail-credentials GMAIL_ADDRESS=... GMAIL_APP_PASSWORD=...
 gmail_secret = modal.Secret.from_name("gmail-credentials")
+# Created via: modal secret create app-config LETTERBOXD_USERNAME=... ZIP_CODE=... HYPE_LIST_URL=...
+# Same keys config.py reads locally from local_config.json - this is that
+# file's remote equivalent, so the repo carries no personal data either way.
+app_config_secret = modal.Secret.from_name("app-config")
 
 
 @app.function(
     image=image,
     volumes={"/data": volume},
-    secrets=[gmail_secret],
+    secrets=[gmail_secret, app_config_secret],
     schedule=modal.Cron("*/15 * * * *"),
     timeout=600,
 )
 def run_scheduler():
+    import config
     import email_alert
     import state
     import scheduler
 
     start = time.monotonic()
-    logger.info(f"Run starting: username={USERNAME} zip={ZIP_CODE}")
+    logger.info(f"Run starting: username={config.LETTERBOXD_USERNAME} zip={config.ZIP_CODE}")
 
     try:
-        result = scheduler.run(USERNAME, ZIP_CODE, db_path=DB_PATH)
+        result = scheduler.run(
+            config.LETTERBOXD_USERNAME, config.ZIP_CODE, hype_list_url=config.HYPE_LIST_URL, db_path=DB_PATH
+        )
 
         # Sending is separate from ticket-checking: a film only counts as
         # "notified" once its email actually sends, so an SMTP failure here
@@ -78,7 +91,20 @@ def run_scheduler():
                 logger.exception(f"Email failed for {notification.film.title} - will retry next run")
     except Exception:
         logger.exception("Run failed")
-        raise  # let Modal mark this invocation as failed/errored in the dashboard
+        # A crashed run wouldn't otherwise be visible anywhere but the Modal
+        # dashboard - best-effort email it directly too, since "just email me
+        # when something breaks" is the actual thing worth having, simpler
+        # than a separate CI pipeline. Wrapped so a failing send here doesn't
+        # mask the real error below.
+        try:
+            email_alert.send_email(
+                "⚠️ Ticket alert run FAILED",
+                "scheduler.run() raised an exception this run. Check the Modal dashboard "
+                "(app: letterboxd-ticket-alert) for the full traceback.",
+            )
+        except Exception:
+            logger.exception("Also failed to send the failure-alert email")
+        raise  # let Modal mark this invocation as failed/errored in the dashboard too
     finally:
         volume.commit()  # persist whatever state.db writes happened, even on failure
 

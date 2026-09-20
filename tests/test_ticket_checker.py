@@ -152,6 +152,61 @@ def test_get_or_match_never_retries_a_documentary_exclusion(monkeypatch):
     assert len(letterboxd_calls) == 1
 
 
+def test_get_or_match_is_hype_bypasses_fresh_documentary_exclusion(monkeypatch):
+    """A Hype-flagged film that would otherwise be excluded as a documentary
+    proceeds to a real Fandango match attempt instead."""
+    monkeypatch.setattr(letterboxd, "get_film_info", lambda slug: make_letterboxd_info(genres=["documentary"]))
+    monkeypatch.setattr(
+        fandango,
+        "match_movie",
+        lambda session, title, year=None, director=None: (make_fandango_candidate(title=title, year=year), []),
+    )
+    monkeypatch.setattr(fandango, "get_release_date", lambda session, slug: None)
+
+    conn = state.connect(":memory:")
+    match = ticket_checker.get_or_match(conn, None, make_film(slug="nuisance-bear-2026"), is_hype=True)
+
+    assert match.excluded_reason is None
+    assert match.fandango_id == "245150"
+
+
+def test_get_or_match_is_hype_overrides_a_past_documentary_exclusion(monkeypatch):
+    """Adding a film to Hype after it was already excluded should un-exclude
+    it, not leave it permanently stuck from before the flag existed."""
+    conn = state.connect(":memory:")
+    state.save_match(conn, "nuisance-bear-2026", None, None, None, None, excluded_reason="documentary")
+    assert state.get_match(conn, "nuisance-bear-2026").excluded_reason == "documentary"
+
+    monkeypatch.setattr(letterboxd, "get_film_info", lambda slug: make_letterboxd_info(genres=["documentary"]))
+    monkeypatch.setattr(
+        fandango,
+        "match_movie",
+        lambda session, title, year=None, director=None: (make_fandango_candidate(title=title, year=year), []),
+    )
+    monkeypatch.setattr(fandango, "get_release_date", lambda session, slug: None)
+
+    match = ticket_checker.get_or_match(conn, None, make_film(slug="nuisance-bear-2026"), is_hype=True)
+    assert match.excluded_reason is None
+    assert match.fandango_id == "245150"
+
+
+def test_get_or_match_is_hype_bypasses_match_retry_backoff(monkeypatch):
+    """A still-unmatched Hype film is retried on every call, not throttled to
+    once a day like a normal unmatched film - the point of Hype is catching a
+    Fandango listing the moment it appears."""
+    calls = []
+    monkeypatch.setattr(letterboxd, "get_film_info", lambda slug: make_letterboxd_info())
+    monkeypatch.setattr(
+        fandango, "match_movie", lambda session, title, year=None, director=None: (calls.append(1) or None, [])
+    )
+
+    conn = state.connect(":memory:")
+    ticket_checker.get_or_match(conn, None, make_film(), is_hype=True)
+    ticket_checker.get_or_match(conn, None, make_film(), is_hype=True)  # immediately again
+
+    assert len(calls) == 2  # both attempted - no backoff applied
+
+
 def test_get_or_match_proceeds_normally_when_letterboxd_info_unavailable(monkeypatch):
     """If the Letterboxd fetch itself fails (network error, page gone), matching
     should still proceed - just without a director hint or fallback date -

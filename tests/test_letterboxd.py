@@ -2,7 +2,7 @@ from datetime import date
 
 import letterboxd
 
-from conftest import fake_html_response, fixture_html
+from conftest import FakeResponse, fake_html_response, fixture_html
 from models import Film
 
 
@@ -30,6 +30,47 @@ def test_get_watchlist_stops_at_max_pages(monkeypatch):
 
     assert len(films) == 28
     assert len(calls) == 1
+
+
+def test_get_list_fetches_bare_url_for_page_one(monkeypatch):
+    """Regression test: a share-token list URL 403s if /page/1/ is appended -
+    only the bare URL works for the first page (confirmed against the real
+    Hype list). get_list must request the bare URL, not .../page/1/."""
+    calls = []
+
+    def fake_get(url, headers=None, timeout=None):
+        calls.append(url)
+        if url.endswith("/share/tok123/"):
+            return fake_html_response("letterboxd_list_hype.html")
+        return FakeResponse(text="", status_code=403)  # any /page/N/ - simulates the real 403
+
+    monkeypatch.setattr(letterboxd.requests, "get", fake_get)
+    films = letterboxd.get_list("https://letterboxd.com/apurvakoti/list/hype/share/tok123/")
+
+    assert len(films) == 1
+    assert films[0].slug == "dune-part-three"
+    # page 1 must be the bare URL (no /page/1/); page 2 is legitimately
+    # attempted next (1 film doesn't prove there's no more) and 403s, ending it
+    assert calls == [
+        "https://letterboxd.com/apurvakoti/list/hype/share/tok123/",
+        "https://letterboxd.com/apurvakoti/list/hype/share/tok123/page/2/",
+    ]
+
+
+def test_get_list_stops_on_403_not_just_404(monkeypatch):
+    """403 has to be treated as "no more pages" too, not just 404 - the share
+    URL's real behavior on /page/N/, confirmed by hand - otherwise this would
+    crash instead of gracefully capping at one page."""
+
+    def fake_get(url, headers=None, timeout=None):
+        if "/page/2/" in url:
+            return FakeResponse(text="", status_code=403)
+        return fake_html_response("letterboxd_list_hype.html")
+
+    monkeypatch.setattr(letterboxd.requests, "get", fake_get)
+    films = letterboxd.get_list("https://letterboxd.com/apurvakoti/list/hype/share/tok123/", max_pages=5)
+
+    assert len(films) == 1  # didn't crash on the page/2/ 403
 
 
 def test_get_director_parses_json_ld(monkeypatch):

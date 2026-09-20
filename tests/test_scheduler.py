@@ -32,6 +32,13 @@ def test_compute_tier_boundaries(release_date, expected):
     assert scheduler.compute_tier(release_date, today=TODAY) == expected
 
 
+@pytest.mark.parametrize("release_date", [None, TODAY - timedelta(days=3650), TODAY + timedelta(days=500)])
+def test_compute_tier_is_hype_overrides_everything(release_date):
+    """A Hype-list film is always TIER_MUST_WATCH regardless of what the
+    release-date math alone would say - unknown, ancient, or years away."""
+    assert scheduler.compute_tier(release_date, today=TODAY, is_hype=True) == scheduler.TIER_MUST_WATCH
+
+
 @pytest.mark.parametrize(
     "year,expected",
     [
@@ -44,6 +51,10 @@ def test_compute_tier_boundaries(release_date, expected):
 )
 def test_in_tracking_scope(year, expected):
     assert scheduler.in_tracking_scope(make_film(year=year), today=TODAY) == expected
+
+
+def test_in_tracking_scope_is_hype_bypasses_the_cutoff():
+    assert scheduler.in_tracking_scope(make_film(year=1958), today=TODAY, is_hype=True) is True
 
 
 def test_next_check_time_stays_within_jitter_bounds():
@@ -87,7 +98,7 @@ REAL_STATUSES = {
 }
 
 
-def _fake_get_or_match(conn, session, film):
+def _fake_get_or_match(conn, session, film, is_hype=False):
     m = REAL_MATCHES.get(film.slug)
     if not m:
         return make_match(letterboxd_slug=film.slug, fandango_id=None)
@@ -151,3 +162,46 @@ def test_run_second_pass_immediately_after_finds_nothing_due(monkeypatch, tmp_pa
 
     assert result["checked"] == []
     assert result["alerts"] == []
+
+
+def test_run_tracks_hype_only_film_and_forces_must_watch_tier(monkeypatch, tmp_path):
+    """A film in the Hype list but NOT on the watchlist still gets tracked and
+    forced to TIER_MUST_WATCH, even with an old year that would otherwise be
+    excluded by the 2-year cutoff - the whole point of the override."""
+    watchlist_films = [make_film(title="Your Mother x3", year=2026, slug="your-mother-x3")]
+    hype_films = [make_film(title="Dune: Part Three", year=1958, slug="dune-part-three")]  # old year on purpose
+
+    def fake_get_or_match(conn, session, film, is_hype=False):
+        return make_match(letterboxd_slug=film.slug, fandango_id="999", fandango_slug="dune-3-999", release_date=None)
+
+    monkeypatch.setattr(letterboxd, "get_watchlist", lambda username, **kw: watchlist_films)
+    monkeypatch.setattr(letterboxd, "get_list", lambda url, **kw: hype_films)
+    monkeypatch.setattr(fandango, "new_session", lambda: None)
+    monkeypatch.setattr(ticket_checker, "get_or_match", fake_get_or_match)
+    monkeypatch.setattr(fandango, "check_ticket_status", lambda *a, **k: None)
+    monkeypatch.setattr(scheduler.time, "sleep", lambda s: None)
+
+    db_path = str(tmp_path / "test.db")
+    result = scheduler.run("fake_user", "94158", hype_list_url="https://letterboxd.com/x/list/hype/", db_path=db_path)
+
+    checked_by_slug = {o.film.slug: o for o in result["checked"]}
+    assert "dune-part-three" in checked_by_slug  # tracked despite not being on the watchlist
+    assert checked_by_slug["dune-part-three"].tier == scheduler.TIER_MUST_WATCH
+
+
+def test_run_hype_fetch_failure_does_not_break_watchlist_tracking(monkeypatch, tmp_path):
+    """If fetching the Hype list itself fails (network error, bad URL), the
+    run should still track the watchlist normally rather than failing outright."""
+    watchlist_films = [make_film(title="Your Mother x3", year=2026, slug="your-mother-x3")]
+
+    monkeypatch.setattr(letterboxd, "get_watchlist", lambda username, **kw: watchlist_films)
+    monkeypatch.setattr(letterboxd, "get_list", lambda url, **kw: (_ for _ in ()).throw(Exception("boom")))
+    monkeypatch.setattr(fandango, "new_session", lambda: None)
+    monkeypatch.setattr(ticket_checker, "get_or_match", _fake_get_or_match)
+    monkeypatch.setattr(fandango, "check_ticket_status", _fake_check_ticket_status)
+    monkeypatch.setattr(scheduler.time, "sleep", lambda s: None)
+
+    db_path = str(tmp_path / "test.db")
+    result = scheduler.run("fake_user", "94158", hype_list_url="https://letterboxd.com/x/list/hype/", db_path=db_path)
+
+    assert {o.film.slug for o in result["checked"]} == {"your-mother-x3"}
