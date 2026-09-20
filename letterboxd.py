@@ -4,7 +4,7 @@ import json
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime
 
 import requests
 from bs4 import BeautifulSoup
@@ -47,7 +47,37 @@ def _parse_page(html):
 GENRE_LINK_RE = re.compile(r'href="/films/genre/([a-z-]+)/"')
 
 
-def get_film_info(slug):
+def _pick_release_date(dates, today=None):
+    """Resolves multiple candidate USA theatrical dates to one.
+
+    Prefers the earliest date that's still upcoming - the first point real
+    public tickets could plausibly exist, which matched Fandango's own
+    release date exactly on every new-release case checked (e.g. Paper
+    Tiger's 13 Nov over its later 20 Nov wide date).
+
+    If none are upcoming, falls back to the most recent PAST date, not the
+    oldest. This matters for legacy films: naively taking the earliest
+    overall would permanently anchor on the decades-old original release and
+    never surface a re-release (verified on Top Gun: 1986 original, then
+    2013/2021/2026 limited re-releases - the falling-back case should return
+    the 2026 one, the latest known re-release, not 1986). The most-recent-past
+    date is also what correctly lands a film in scheduler.TIER_RETIRED rather
+    than looking artificially ancient, and it's what a periodic refresh (see
+    ticket_checker.get_or_match) compares against to notice a newly-listed
+    re-release later.
+
+    `today` is exposed as a parameter (not just date.today() internally) so
+    this stays deterministically testable against fixed fixture dates,
+    independent of when the test actually runs.
+    """
+    today = today or date.today()
+    upcoming = [d for d in dates if d >= today]
+    if upcoming:
+        return min(upcoming)
+    return max(dates) if dates else None
+
+
+def get_film_info(slug, today=None):
     """Single fetch of a film's Letterboxd page, returning everything this
     project needs from it together: director, US theatrical release date, and
     genre slugs. These used to be two separate fetches to the same page
@@ -55,6 +85,10 @@ def get_film_info(slug):
     consolidated so a film is only ever fetched once here, since the scheduler
     now also needs genre (to exclude documentaries) before it decides whether
     to even attempt a Fandango match at all.
+
+    `today` is forwarded to _pick_release_date - see its docstring; exposed
+    here too so callers (and tests) can pin it without reaching into a
+    private helper.
 
     Returns a LetterboxdInfo.
     """
@@ -79,15 +113,15 @@ def get_film_info(slug):
         except json.JSONDecodeError:
             poster_url = poster_match.group(1)
 
-    # A film can list multiple USA dates - e.g. a limited release ahead of a
-    # wider one, or a later awards-qualifying expansion - across the
-    # "Theatrical limited" and "Theatrical" sections (verified against real
-    # cases: Paper Tiger has USA dates of 13 Nov, 20 Nov, and 12 Feb the
-    # following year across those two sections). The earliest of those is what
-    # matters for scheduling - the first point real public tickets could
-    # plausibly exist - and it's also what matched Fandango's own release date
-    # exactly in both cases checked. "Premiere" entries (festival/special
-    # screenings, not public tickets) are excluded.
+    # A film can list multiple USA dates across the "Theatrical limited" and
+    # "Theatrical" sections - e.g. a limited release ahead of a wider one, or
+    # a later awards-qualifying expansion (verified on Paper Tiger: 13 Nov,
+    # 20 Nov) - and a legacy film can list several USA dates this way too:
+    # the original release plus one or more later theatrical re-releases
+    # (verified on Top Gun: 1986 original, then 2013/2021/2026 limited
+    # re-releases). See _pick_release_date for how these get resolved to one
+    # date. "Premiere" entries (festival/special screenings, not public
+    # tickets) are excluded from both sections either way.
     dates = []
     for heading in soup.select("h3.release-table-title"):
         if heading.get_text(strip=True) not in ("Theatrical", "Theatrical limited"):
@@ -103,7 +137,8 @@ def get_film_info(slug):
                     dates.append(datetime.strptime(date_el.get_text(strip=True), "%d %b %Y").date())
                 except ValueError:
                     continue
-    release_date = min(dates) if dates else None
+
+    release_date = _pick_release_date(dates, today=today)
 
     genres = sorted(set(GENRE_LINK_RE.findall(html)))
 
@@ -119,10 +154,10 @@ def get_director(slug):
     return get_film_info(slug).director
 
 
-def get_us_release_date(slug):
+def get_us_release_date(slug, today=None):
     """Fetches a film's US theatrical release date from Letterboxd's own
     Releases tab. See get_film_info for the parsing details."""
-    return get_film_info(slug).release_date
+    return get_film_info(slug, today=today).release_date
 
 
 def get_watchlist(username, delay=0.5, max_pages=None):

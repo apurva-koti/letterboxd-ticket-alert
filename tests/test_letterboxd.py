@@ -126,7 +126,10 @@ def test_get_us_release_date_single_theatrical_entry(monkeypatch):
     monkeypatch.setattr(
         letterboxd.requests, "get", lambda url, headers=None, timeout=None: fake_html_response("letterboxd_film_digger.html")
     )
-    assert letterboxd.get_us_release_date("digger-2026") == date(2026, 10, 2)
+    # Pinned today: this date is upcoming relative to any today before it, so
+    # the exact pin doesn't matter here - just keeping it deterministic like
+    # the other date-selection tests below.
+    assert letterboxd.get_us_release_date("digger-2026", today=date(2026, 1, 1)) == date(2026, 10, 2)
 
 
 def test_get_us_release_date_picks_earliest_across_sections(monkeypatch):
@@ -135,13 +138,18 @@ def test_get_us_release_date_picks_earliest_across_sections(monkeypatch):
     Premiere date (25 Sep, not a real public release) and an unrelated Spain
     date (12 Feb) that a naive nearest-preceding-date scrape would misattribute
     to USA. The correct answer is the earliest real theatrical date, 13 Nov -
-    which is also what Fandango's own release date field gave for this film."""
+    which is also what Fandango's own release date field gave for this film.
+
+    today is pinned before both dates (rather than left to real wall-clock
+    date.today()) so this stays correct regardless of when the test actually
+    runs - see _pick_release_date's docstring for why "today" changes which
+    of the two dates is correct once either one is in the past."""
     monkeypatch.setattr(
         letterboxd.requests,
         "get",
         lambda url, headers=None, timeout=None: fake_html_response("letterboxd_film_papertiger.html"),
     )
-    assert letterboxd.get_us_release_date("paper-tiger-2026") == date(2026, 11, 13)
+    assert letterboxd.get_us_release_date("paper-tiger-2026", today=date(2026, 1, 1)) == date(2026, 11, 13)
 
 
 def test_get_film_info_extracts_genre_for_documentary(monkeypatch):
@@ -173,5 +181,36 @@ def test_get_us_release_date_none_when_no_theatrical_section(monkeypatch):
     monkeypatch.setattr(
         letterboxd.requests, "get", lambda url, headers=None, timeout=None: fake_html_response("letterboxd_film_vertigo.html")
     )
-    result = letterboxd.get_us_release_date("vertigo")
+    result = letterboxd.get_us_release_date("vertigo", today=date(2026, 1, 1))
     assert result is None or isinstance(result, date)
+
+
+def test_pick_release_date_prefers_earliest_upcoming():
+    """New-release case (Paper Tiger-style): both candidate dates are still
+    upcoming relative to today - the earlier one wins, not the later wide
+    release."""
+    dates = [date(2026, 11, 20), date(2026, 11, 13)]
+    assert letterboxd._pick_release_date(dates, today=date(2026, 1, 1)) == date(2026, 11, 13)
+
+
+def test_pick_release_date_falls_back_to_most_recent_past_for_legacy_films():
+    """Legacy-film case (Top Gun-style): once every candidate date is in the
+    past relative to today, naively taking the earliest overall would
+    permanently anchor on the decades-old original release (1986) and never
+    surface a later re-release. The correct fallback is the most RECENT past
+    date - the latest known re-release - not the oldest."""
+    dates = [date(1986, 5, 16), date(2013, 2, 8), date(2021, 5, 21), date(2026, 5, 13)]
+    assert letterboxd._pick_release_date(dates, today=date(2026, 9, 20)) == date(2026, 5, 13)
+
+
+def test_pick_release_date_mixed_past_and_future_prefers_upcoming():
+    """A mix of past and future candidates - e.g. a re-release just occurred
+    and a further one is already announced - should prefer the upcoming one
+    over the past one, consistent with the "earliest upcoming" preference for
+    brand-new releases."""
+    dates = [date(2021, 5, 21), date(2026, 12, 1)]
+    assert letterboxd._pick_release_date(dates, today=date(2026, 9, 20)) == date(2026, 12, 1)
+
+
+def test_pick_release_date_empty_list_returns_none():
+    assert letterboxd._pick_release_date([], today=date(2026, 1, 1)) is None

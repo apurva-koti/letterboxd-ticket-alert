@@ -97,23 +97,30 @@ date approaches and passes.
 | `hot` | Unreleased, ≤90 days out | every ~3h |
 | `recent` | Released ≤14 days ago | every ~8h |
 | `far_future` / `unknown` | Unreleased >90 days out, or no release date found yet | every ~24h |
-| `retired` | Released >14 days ago | every ~180 days (effectively dormant) |
+| `retired` | Released (or last known to release) >14 days ago | every ~30 days (jittered) |
 
-Films whose Letterboxd year is more than 2 years old are excluded from
-tracking entirely (assumed to be a revival screening, not an original
-release, if anything's playing) - **unless** they're on the Hype list, which
-overrides this. Documentaries are excluded too (Fandango/Box Office Mojo
-don't track them reliably), with the same Hype override.
+Every watchlist film is tracked, including old/legacy ones - Letterboxd
+lists re-release dates for plenty of legacy films (e.g. Top Gun, Sense and
+Sensibility) alongside their original run, so age alone isn't a reason to
+stop tracking a film. A film that's well past its currently-known release
+date just gets checked much less often (`retired`, ~every 30 days) - and
+each of those slow checks re-fetches the release date too, so a
+later-announced re-release eventually gets noticed and the film moves back
+into a faster tier automatically. Documentaries are excluded from tracking
+entirely (Fandango/Box Office Mojo don't track them reliably), **unless**
+they're on the Hype list, which overrides that.
 
 ### Must-watch films ("Hype")
 
 Some films' tickets go on sale with almost no notice (Dune 3-style), and
-`hot` tier's 3-hour cadence isn't enough for those. The fix: make a
+`hot` tier's 3-hour cadence isn't enough for those. Hype is specifically for
+urgent, upcoming pre-sales - not a way to fast-track legacy films, which are
+already handled by the slow `retired`-tier refresh above. The fix: make a
 Letterboxd list (any name; `HYPE_LIST_URL` just needs to point at it) and add
 films to it. Anything in that list:
 
 - Is tracked even if it's not on your watchlist
-- Bypasses the 2-year-old cutoff and the documentary exclusion
+- Bypasses the documentary exclusion
 - Gets checked on literally every scheduled run, not just every few hours
 
 The list can be private - use its share link (the `boxd.it` short link, or
@@ -162,9 +169,6 @@ python3 -m pytest -m live      # hits the actual sites - run after touching a pa
   automated schedule for it currently - a crashed *run* emails you (see
   `modal_app.py`), but silent parsing degradation, by definition, doesn't
   crash. Re-running the live tests periodically is the mitigation for now.
-- **The 2-year cutoff is a proxy, not a guarantee.** Letterboxd's listed year
-  can be a festival year rather than the theatrical one, so a film could
-  legitimately be excluded a bit early. Add it to Hype to override.
 - **Fandango doesn't cover every theater**, especially small/independent
   arthouse chains - matching only works for films Fandango actually
   catalogs.

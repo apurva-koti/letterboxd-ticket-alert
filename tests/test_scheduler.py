@@ -39,24 +39,6 @@ def test_compute_tier_is_hype_overrides_everything(release_date):
     assert scheduler.compute_tier(release_date, today=TODAY, is_hype=True) == scheduler.TIER_MUST_WATCH
 
 
-@pytest.mark.parametrize(
-    "year,expected",
-    [
-        (2026, True),
-        (2024, True),  # exactly at the cutoff, still in scope
-        (2023, False),
-        (1958, False),
-        (None, True),  # unknown year - can't judge, let it through
-    ],
-)
-def test_in_tracking_scope(year, expected):
-    assert scheduler.in_tracking_scope(make_film(year=year), today=TODAY) == expected
-
-
-def test_in_tracking_scope_is_hype_bypasses_the_cutoff():
-    assert scheduler.in_tracking_scope(make_film(year=1958), today=TODAY, is_hype=True) is True
-
-
 def test_next_check_time_stays_within_jitter_bounds():
     now = datetime(2026, 9, 19, tzinfo=timezone.utc)
     interval = scheduler.INTERVALS[scheduler.TIER_HOT]
@@ -117,13 +99,17 @@ def _fake_check_ticket_status(session, fandango_id, fandango_slug, zip_code, rel
     return None
 
 
-def test_run_excludes_old_films_hot_films_alert_retired_films_still_checked_once(monkeypatch, tmp_path):
+def test_run_skips_unmatched_films_hot_films_alert_retired_films_still_checked_once(monkeypatch, tmp_path):
+    """Legacy films (Vertigo, Close-Up) are tracked like any other watchlist
+    film now - no age-based cutoff - but still drop out of this run's
+    checked set because _fake_get_or_match has no Fandango match for them
+    (fandango_id=None), same as any other still-unmatched film would."""
     films = [
-        make_film(title="Coyote vs. Acme", year=2024, slug="coyote-vs-acme"),  # in-scope but retired tier
+        make_film(title="Coyote vs. Acme", year=2024, slug="coyote-vs-acme"),  # retired tier
         make_film(title="Your Mother x3", year=2026, slug="your-mother-x3"),  # hot
         make_film(title="Digger", year=2026, slug="digger-2026"),  # hot, announced only
-        make_film(title="Vertigo", year=1958, slug="vertigo"),  # excluded: >2yr old
-        make_film(title="Close-Up", year=1990, slug="close-up"),  # excluded: >2yr old
+        make_film(title="Vertigo", year=1958, slug="vertigo"),  # legacy, unmatched
+        make_film(title="Close-Up", year=1990, slug="close-up"),  # legacy, unmatched
     ]
     monkeypatch.setattr(letterboxd, "get_watchlist", lambda username, **kw: films)
     monkeypatch.setattr(fandango, "new_session", lambda: None)
@@ -136,7 +122,7 @@ def test_run_excludes_old_films_hot_films_alert_retired_films_still_checked_once
 
     checked_slugs = {o.film.slug for o in result["checked"]}
     assert checked_slugs == {"coyote-vs-acme", "your-mother-x3", "digger-2026"}
-    assert "vertigo" not in checked_slugs
+    assert "vertigo" not in checked_slugs  # unmatched, not excluded by scope
     assert "close-up" not in checked_slugs
 
     alerted_slugs = {o.film.slug for o in result["alerts"]}
@@ -166,8 +152,7 @@ def test_run_second_pass_immediately_after_finds_nothing_due(monkeypatch, tmp_pa
 
 def test_run_tracks_hype_only_film_and_forces_must_watch_tier(monkeypatch, tmp_path):
     """A film in the Hype list but NOT on the watchlist still gets tracked and
-    forced to TIER_MUST_WATCH, even with an old year that would otherwise be
-    excluded by the 2-year cutoff - the whole point of the override."""
+    forced to TIER_MUST_WATCH regardless of its year."""
     watchlist_films = [make_film(title="Your Mother x3", year=2026, slug="your-mother-x3")]
     hype_films = [make_film(title="Dune: Part Three", year=1958, slug="dune-part-three")]  # old year on purpose
 

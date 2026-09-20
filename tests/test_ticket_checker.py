@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
 
+import boxofficemojo
 import fandango
 import letterboxd
 import state
@@ -223,6 +224,92 @@ def test_get_or_match_proceeds_normally_when_letterboxd_info_unavailable(monkeyp
     match = ticket_checker.get_or_match(conn, None, make_film())
     assert match.fandango_id == "245150"
     assert match.excluded_reason is None
+
+
+def test_get_or_match_refreshes_release_date_for_retired_tier_match(monkeypatch):
+    """A matched film whose release date is now well in the past (RETIRED
+    tier) should have its release date re-checked, not just returned as-is -
+    this is what lets a legacy film's later-announced re-release (e.g. Top
+    Gun) actually get noticed."""
+    import scheduler
+
+    conn = state.connect(":memory:")
+    old_date = date.today() - timedelta(days=scheduler.RECENT_WINDOW_DAYS + 1000)
+    state.save_match(
+        conn, "top-gun", "111", "top-gun-111", "Top Gun", 1986, old_date, "letterboxd", poster_url="http://x/poster.jpg"
+    )
+
+    new_date = date.today() + timedelta(days=200)  # a newly-announced re-release
+    monkeypatch.setattr(fandango, "get_release_date", lambda session, slug: None)
+    monkeypatch.setattr(letterboxd, "get_us_release_date", lambda slug: new_date)
+
+    match = ticket_checker.get_or_match(conn, None, make_film(slug="top-gun", title="Top Gun", year=1986))
+
+    assert match.release_date == new_date.isoformat()
+    assert match.release_date_source == "letterboxd"
+    assert match.fandango_id == "111"  # the match itself is untouched, only the date changed
+    assert match.poster_url == "http://x/poster.jpg"
+
+
+def test_get_or_match_keeps_existing_release_date_when_refresh_finds_nothing_new(monkeypatch):
+    """If none of the fallback sources have anything on a re-check, the
+    previously-known (past) release date should be kept, not blanked out -
+    losing it entirely would knock the film into TIER_UNKNOWN instead of
+    TIER_RETIRED."""
+    import scheduler
+
+    conn = state.connect(":memory:")
+    old_date = date.today() - timedelta(days=scheduler.RECENT_WINDOW_DAYS + 1000)
+    state.save_match(conn, "close-up", "222", "close-up-222", "Close-Up", 1990, old_date, "letterboxd")
+
+    monkeypatch.setattr(fandango, "get_release_date", lambda session, slug: None)
+    monkeypatch.setattr(letterboxd, "get_us_release_date", lambda slug: None)
+    monkeypatch.setattr(boxofficemojo, "find_release_date", lambda title: None)
+
+    match = ticket_checker.get_or_match(conn, None, make_film(slug="close-up", title="Close-Up", year=1990))
+
+    assert match.release_date == old_date.isoformat()
+    assert match.release_date_source == "letterboxd"
+
+
+def test_get_or_match_does_not_refresh_a_still_recent_release_date(monkeypatch):
+    """A matched film whose release date is recent (not yet RETIRED tier)
+    should be returned from cache untouched - no extra Letterboxd/Fandango
+    hit on every non-RETIRED check."""
+    conn = state.connect(":memory:")
+    recent_date = date.today() - timedelta(days=3)
+    state.save_match(conn, "your-mother-x3", "333", "your-mother-x3-333", "Your Mother x3", 2026, recent_date, "fandango")
+
+    calls = []
+    monkeypatch.setattr(fandango, "get_release_date", lambda session, slug: calls.append(1) or None)
+    monkeypatch.setattr(letterboxd, "get_us_release_date", lambda slug: calls.append(1) or None)
+
+    match = ticket_checker.get_or_match(conn, None, make_film(slug="your-mother-x3", title="Your Mother x3"))
+
+    assert calls == []
+    assert match.release_date == recent_date.isoformat()
+
+
+def test_get_or_match_does_not_refresh_release_date_for_hype_films(monkeypatch):
+    """Hype films are checked every run - refreshing a release date that
+    often would be pure waste, and isn't what Hype is for (urgent upcoming
+    pre-sales, not legacy re-release discovery)."""
+    import scheduler
+
+    conn = state.connect(":memory:")
+    old_date = date.today() - timedelta(days=scheduler.RECENT_WINDOW_DAYS + 1000)
+    state.save_match(conn, "old-hype-film", "444", "old-hype-film-444", "Old Hype Film", 1958, old_date, "letterboxd")
+
+    calls = []
+    monkeypatch.setattr(fandango, "get_release_date", lambda session, slug: calls.append(1) or None)
+    monkeypatch.setattr(letterboxd, "get_us_release_date", lambda slug: calls.append(1) or None)
+
+    match = ticket_checker.get_or_match(
+        conn, None, make_film(slug="old-hype-film", title="Old Hype Film", year=1958), is_hype=True
+    )
+
+    assert calls == []
+    assert match.release_date == old_date.isoformat()
 
 
 def test_check_film_alerts_only_on_transition_into_on_sale(monkeypatch):

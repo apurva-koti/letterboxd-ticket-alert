@@ -4,19 +4,18 @@ launchd, Modal, etc. - deliberately not decided yet) every ~15-30 min; each run
 only touches films whose next_check_at has passed, so invoking it more often
 than that just no-ops for everything not yet due.
 
-Re-releases/revival screenings are explicitly out of scope for this project -
-only a film's own original theatrical run is tracked. Two consequences of that:
-
-1. A film whose Letterboxd year is more than TRACKING_CUTOFF_YEARS old is
-   skipped entirely, before even attempting a Fandango match - any ticket
-   activity for it at this point would be a revival screening, not its release.
-   (Letterboxd's year can be a festival year rather than the theatrical one, so
-   this is a coarse proxy, not a guarantee - accepted tradeoff for the films
-   this excludes.)
-2. A film that's more than RECENT_WINDOW_DAYS past its own release date drops
-   into TIER_RETIRED (checked at most once every ~6 months) rather than being
-   polled daily forever - any on-sale event that far out would itself be a
-   revival, which is exactly what's being scoped out.
+Every watchlist film is tracked, including old/legacy ones - Letterboxd lists
+re-release dates for plenty of legacy films (verified on Top Gun, Sense and
+Sensibility) alongside their original theatrical run, so a film being old is
+not evidence there's nothing left to check. What changes for a film that's
+well past its (currently known) release date is cadence, not whether it's
+tracked at all: it drops into TIER_RETIRED, checked only once every ~30 days
+(jittered - see JITTER_FRACTION) instead of daily. Each of those slow checks
+re-fetches the film's release date (see ticket_checker.get_or_match), so a
+newly-announced re-release is eventually noticed; once that happens,
+compute_tier reclassifies the film into a faster tier on its own next check,
+same as any other film - there's no separate mechanism needed for that, since
+tier is recomputed fresh every check rather than being a stored label.
 
 Tiering is based on proximity to a film's release date, since there's no
 "tickets go on sale" field anywhere (Fandango, Letterboxd, and Box Office Mojo
@@ -28,9 +27,11 @@ release-date-based tier catches early on its own.
 The override for that: a Letterboxd list (e.g. "Hype") named by
 config.HYPE_LIST_URL. Anything in that list is tracked regardless of the
 watchlist, forced into TIER_MUST_WATCH (checked every single run, however
-often that's invoked), and exempt from both the 2-year cutoff and the
-documentary exclusion - an explicit "I care about this" signal overrides both
-heuristics. The list can be private (a boxd.it share link); see README.
+often that's invoked), and exempt from the documentary exclusion - an
+explicit "I care about this" signal overrides that heuristic. Hype is meant
+for urgent, upcoming pre-sales specifically, not a way to fast-track legacy
+films - those are handled by the slow TIER_RETIRED refresh above instead. The
+list can be private (a boxd.it share link); see README.
 """
 
 import random
@@ -49,7 +50,7 @@ TIER_HOT = "hot"  # unreleased, <=90 days out - checked most frequently
 TIER_RECENT = "recent"  # released within the last 2 weeks - less frequently
 TIER_FAR_FUTURE = "far_future"  # unreleased, >90 days out - still less frequently
 TIER_UNKNOWN = "unknown"  # no release date found from any source yet
-TIER_RETIRED = "retired"  # released >2 weeks ago - out of scope (would be a revival)
+TIER_RETIRED = "retired"  # released (or last known to release) >2 weeks ago - checked slowly for a re-release
 
 INTERVALS = {
     TIER_MUST_WATCH: timedelta(minutes=1),  # shorter than any realistic poll interval - always due
@@ -57,34 +58,21 @@ INTERVALS = {
     TIER_RECENT: timedelta(hours=8),
     TIER_FAR_FUTURE: timedelta(hours=24),
     TIER_UNKNOWN: timedelta(hours=24),
-    TIER_RETIRED: timedelta(days=180),
+    TIER_RETIRED: timedelta(days=30),
 }
 
 # Interval is jittered by up to this fraction so films in the same tier don't
-# all become due at the same instant and burst-check together every cycle.
+# all become due at the same instant and burst-check together every cycle -
+# for TIER_RETIRED specifically, this is what spreads legacy films' ~30-day
+# release-date refreshes out across different days instead of all landing on
+# the same cadence.
 JITTER_FRACTION = 0.15
 
 HOT_WINDOW_DAYS = 90
 RECENT_WINDOW_DAYS = 14
-TRACKING_CUTOFF_YEARS = 2
 
 # Politeness delay between Fandango/Letterboxd/Box Office Mojo requests within a run.
 REQUEST_DELAY_SECONDS = 0.3
-
-
-def in_tracking_scope(film, today=None, is_hype=False):
-    """False for films whose Letterboxd year is old enough that any ticket
-    activity now would be a revival screening, not the original release -
-    out of scope by design. Films with no listed year are let through (can't
-    judge them); they'll fall into TIER_UNKNOWN if no release date turns up.
-    A Hype-list film always stays in scope - an explicit "I care about this"
-    signal overrides the coarse age-based proxy."""
-    if is_hype:
-        return True
-    today = today or date.today()
-    if film.year is None:
-        return True
-    return (today.year - film.year) <= TRACKING_CUTOFF_YEARS
 
 
 def compute_tier(release_date, today=None, is_hype=False):
@@ -147,9 +135,6 @@ def run(username, zip_code, hype_list_url=None, db_path=state.DB_PATH):
     for row in conn.execute("SELECT * FROM films"):
         film = Film(slug=row["slug"], title=row["title"], year=row["year"], url=row["url"])
         is_hype = film.slug in hype_slugs
-
-        if not in_tracking_scope(film, today=now.date(), is_hype=is_hype):
-            continue  # too old to be its original release - would be a revival, out of scope
 
         status_row = state.get_ticket_status(conn, film.slug)
         if status_row and not is_due(status_row.next_check_at, now):

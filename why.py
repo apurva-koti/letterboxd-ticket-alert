@@ -5,7 +5,7 @@ Usage: python3 why.py "<title or letterboxd slug>"
 """
 
 import sys
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
 import letterboxd
@@ -53,14 +53,6 @@ def explain(conn, film_row, hype_slugs):
     print(f"  {film.url}")
     print(f"  On Hype list: {'yes' if is_hype else 'no'}")
     print()
-
-    if not scheduler.in_tracking_scope(film, today=date.today(), is_hype=is_hype):
-        print(
-            f"  NOT TRACKED: Letterboxd year {film.year} is more than "
-            f"{scheduler.TRACKING_CUTOFF_YEARS} years old (and it's not on the Hype list, "
-            f"which would override this)."
-        )
-        return
 
     match = state.get_match(conn, slug)
     if not match:

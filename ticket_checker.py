@@ -25,6 +25,72 @@ MATCH_RETRY_INTERVAL = timedelta(days=1)
 DOCUMENTARY_GENRE = "documentary"
 
 
+def _due_for_release_date_refresh(release_date_str, today=None):
+    """True once a matched film's cached release_date has fallen far enough
+    into the past that scheduler.compute_tier would classify it TIER_RETIRED
+    (see scheduler.RECENT_WINDOW_DAYS - imported lazily here rather than at
+    module level, since scheduler imports this module and a top-level import
+    the other way would be circular). None (never found any date at all) is
+    treated as not due - that's TIER_UNKNOWN's territory, a separate, already
+    unaffected 24h cadence, not this legacy-refresh path."""
+    if not release_date_str:
+        return False
+    import scheduler
+
+    today = today or date.today()
+    release_date = date.fromisoformat(release_date_str)
+    return (today - release_date).days > scheduler.RECENT_WINDOW_DAYS
+
+
+def _refresh_release_date(conn, session, film, existing):
+    """Re-checks a RETIRED-tier film's release date, without re-searching
+    Fandango for a match (the match itself doesn't change - only whether a
+    newer date, e.g. a re-release, has since appeared). Same source priority
+    as a fresh match: Fandango's own release date first, then Letterboxd,
+    then Box Office Mojo. If nothing new turns up, the existing match is kept
+    untouched rather than blanked out - a fallback yielding nothing shouldn't
+    erase a previously-known date and knock the film into TIER_UNKNOWN."""
+    release_date, release_date_source = None, None
+    try:
+        release_date = fandango.get_release_date(session, existing.fandango_slug)
+        if release_date:
+            release_date_source = "fandango"
+    except Exception:
+        pass
+
+    if not release_date:
+        try:
+            release_date = letterboxd.get_us_release_date(film.slug)
+            if release_date:
+                release_date_source = "letterboxd"
+        except Exception:
+            pass
+
+    if not release_date:
+        try:
+            release_date = boxofficemojo.find_release_date(film.title)
+            if release_date:
+                release_date_source = "boxofficemojo"
+        except Exception:
+            pass
+
+    if not release_date:
+        return existing
+
+    state.save_match(
+        conn,
+        film.slug,
+        existing.fandango_id,
+        existing.fandango_slug,
+        existing.matched_title,
+        existing.matched_year,
+        release_date,
+        release_date_source,
+        poster_url=existing.poster_url,
+    )
+    return state.get_match(conn, film.slug)
+
+
 def get_or_match(conn, session, film, is_hype=False):
     """Looks up a film's Fandango match from the DB, or searches for one if it's
     never been attempted or the last attempt (more than MATCH_RETRY_INTERVAL ago)
@@ -46,12 +112,27 @@ def get_or_match(conn, session, film, is_hype=False):
     wins when present - it's what check_ticket_status itself polls, so
     scheduling off Fandango's own notion of "release" stays self-consistent -
     Letterboxd (then Box Office Mojo) only fill in when Fandango has nothing.
+
+    A film that's already matched and whose release date is now old enough to
+    be TIER_RETIRED gets that date re-checked here instead of trusted forever
+    (see _due_for_release_date_refresh) - this is what lets a legacy film's
+    later-announced re-release (verified on Top Gun, Sense and Sensibility)
+    actually get noticed, since compute_tier is recomputed fresh every check
+    and will naturally reclassify the film into a faster tier once a newer
+    date shows up. No separate cadence-gating is needed for this inside the
+    function itself: the scheduler only calls get_or_match once a film is
+    actually due, so a RETIRED film only reaches this path on its own slow
+    (~30-day) cadence, not on every run. Skipped for is_hype films - Hype is
+    for urgent upcoming pre-sales, checked every run, and re-fetching a
+    release date that often would be pure waste.
     """
     existing = state.get_match(conn, film.slug)
     if existing:
         if existing.excluded_reason and not is_hype:
             return existing  # permanently out of scope, never retried
         if existing.fandango_id:
+            if not is_hype and _due_for_release_date_refresh(existing.release_date):
+                return _refresh_release_date(conn, session, film, existing)
             return existing
         last_checked = datetime.fromisoformat(existing.checked_at)
         if not is_hype and datetime.now(timezone.utc) - last_checked < MATCH_RETRY_INTERVAL:
