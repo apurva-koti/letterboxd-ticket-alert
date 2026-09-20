@@ -115,27 +115,22 @@ def test_match_movie_resolves_tie_via_fuzzy_director_match(monkeypatch):
     assert match is None
 
 
-def test_match_movie_requires_director_confirmation_for_large_year_gap(monkeypatch):
+def test_match_movie_declines_sole_candidate_when_director_contradicts(monkeypatch):
     """Regression test for a real mismatch caught in production: Letterboxd's
     "Center Stage" (1991) confidently matched Fandango's unrelated "Center
-    Stage" (2000) - same title, nothing else cataloged to tie against, and the
-    9-year gap was only ever a soft scoring nudge, never a hard check. A big
-    year gap against a lone top candidate must now require director
-    confirmation instead of being accepted on title score alone."""
+    Stage" (2000) - same title, nothing else cataloged to tie against, so
+    title score alone had nothing to stop it. A sole, unambiguous top
+    candidate must now also be confirmed by director, not accepted on title
+    score alone - a contradiction there means decline, not guess."""
     candidates = [make_fandango_candidate(fandango_id="1", slug="center-stage-2000", title="Center Stage", year=2000)]
     monkeypatch.setattr(fandango, "search_movie", lambda session, title: candidates)
     monkeypatch.setattr(fandango, "get_director", lambda session, slug: "Nicholas Hytner")
 
-    # No director given at all - can't confirm, so don't guess.
-    match, _ = fandango.match_movie(None, "Center Stage", year=1991)
-    assert match is None
-
-    # Director given, but doesn't match the candidate's real director.
     match, _ = fandango.match_movie(None, "Center Stage", year=1991, director="Robert Sidney")
     assert match is None
 
 
-def test_match_movie_accepts_large_year_gap_when_director_confirms(monkeypatch):
+def test_match_movie_accepts_sole_candidate_when_director_confirms(monkeypatch):
     """The flip side: a large year gap (e.g. a legacy film's original year vs.
     a Fandango re-release listing) should still match once the director
     genuinely lines up - this is exactly the shape of a real re-release
@@ -150,19 +145,49 @@ def test_match_movie_accepts_large_year_gap_when_director_confirms(monkeypatch):
     assert match.slug == "top-gun-2026"
 
 
-def test_match_movie_small_year_gap_does_not_require_director(monkeypatch):
-    """A gap within YEAR_DISAMBIGUATION_THRESHOLD (e.g. an ordinary festival-
-    year-vs-theatrical-year mismatch) should still match on title alone,
-    without needing (or fetching) a director at all."""
+def test_match_movie_checks_director_even_without_ambiguity_or_year_gap(monkeypatch):
+    """The director confirmation isn't gated by a tie or a suspicious year gap
+    - it's checked whenever a director is available at all, since the Center
+    Stage mismatch above had neither of those signals either. Even an
+    ordinary, matching-year single candidate gets the extra request."""
     candidates = [make_fandango_candidate(fandango_id="1", slug="some-film", title="Some Film", year=2026)]
     director_calls = []
     monkeypatch.setattr(fandango, "search_movie", lambda session, title: candidates)
     monkeypatch.setattr(fandango, "get_director", lambda session, slug: director_calls.append(1) or "Someone")
 
-    match, _ = fandango.match_movie(None, "Some Film", year=2025)  # 1-year gap, within threshold
+    match, _ = fandango.match_movie(None, "Some Film", year=2026, director="Someone")
 
     assert match is not None
-    assert director_calls == []  # no extra request needed
+    assert director_calls == [1]  # the confirmation request did happen
+
+
+def test_match_movie_falls_back_to_title_only_when_no_director_given(monkeypatch):
+    """When the caller has no Letterboxd director to compare (e.g. it
+    couldn't be parsed), there's nothing to confirm or refute - a sole,
+    unambiguous title match should still be accepted rather than declined
+    just because that data happens to be missing."""
+    candidates = [make_fandango_candidate(fandango_id="1", slug="some-film", title="Some Film", year=2026)]
+    director_calls = []
+    monkeypatch.setattr(fandango, "search_movie", lambda session, title: candidates)
+    monkeypatch.setattr(fandango, "get_director", lambda session, slug: director_calls.append(1) or "Someone")
+
+    match, _ = fandango.match_movie(None, "Some Film", year=2026)  # no director passed at all
+
+    assert match is not None
+    assert director_calls == []  # nothing to confirm against - never even fetched
+
+
+def test_match_movie_falls_back_to_title_only_when_fandango_has_no_director(monkeypatch):
+    """When a director IS given but Fandango's own page doesn't credit one for
+    the candidate (a real, fairly common gap), that's a missing signal, not a
+    contradiction - it shouldn't be treated the same as a real mismatch."""
+    candidates = [make_fandango_candidate(fandango_id="1", slug="some-film", title="Some Film", year=2026)]
+    monkeypatch.setattr(fandango, "search_movie", lambda session, title: candidates)
+    monkeypatch.setattr(fandango, "get_director", lambda session, slug: None)
+
+    match, _ = fandango.match_movie(None, "Some Film", year=2026, director="Someone")
+
+    assert match is not None
 
 
 def test_get_director_from_overview_page(monkeypatch):
