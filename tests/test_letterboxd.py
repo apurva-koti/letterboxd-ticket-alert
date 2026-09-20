@@ -45,7 +45,7 @@ def test_get_list_fetches_bare_url_for_page_one(monkeypatch):
         return FakeResponse(text="", status_code=403)  # any /page/N/ - simulates the real 403
 
     monkeypatch.setattr(letterboxd.requests, "get", fake_get)
-    films = letterboxd.get_list("https://letterboxd.com/apurvakoti/list/hype/share/tok123/")
+    films = letterboxd.get_list("https://letterboxd.com/exampleuser/list/hype/share/tok123/")
 
     assert len(films) == 1
     assert films[0].slug == "dune-part-three"
@@ -53,9 +53,9 @@ def test_get_list_fetches_bare_url_for_page_one(monkeypatch):
     # attempted next (1 film doesn't prove there's no more) - path form 403s,
     # so the ?page= fallback is tried too, which also 403s here, ending it
     assert calls == [
-        "https://letterboxd.com/apurvakoti/list/hype/share/tok123/",
-        "https://letterboxd.com/apurvakoti/list/hype/share/tok123/page/2/",
-        "https://letterboxd.com/apurvakoti/list/hype/share/tok123/?page=2",
+        "https://letterboxd.com/exampleuser/list/hype/share/tok123/",
+        "https://letterboxd.com/exampleuser/list/hype/share/tok123/page/2/",
+        "https://letterboxd.com/exampleuser/list/hype/share/tok123/?page=2",
     ]
 
 
@@ -70,7 +70,7 @@ def test_get_list_stops_on_403_not_just_404(monkeypatch):
         return fake_html_response("letterboxd_list_hype.html")
 
     monkeypatch.setattr(letterboxd.requests, "get", fake_get)
-    films = letterboxd.get_list("https://letterboxd.com/apurvakoti/list/hype/share/tok123/", max_pages=5)
+    films = letterboxd.get_list("https://letterboxd.com/exampleuser/list/hype/share/tok123/", max_pages=5)
 
     assert len(films) == 1  # didn't crash on the page/2/ 403
 
@@ -93,7 +93,7 @@ def test_get_list_falls_back_to_query_param_on_403(monkeypatch):
         raise AssertionError(f"unexpected URL: {url}")
 
     monkeypatch.setattr(letterboxd.requests, "get", fake_get)
-    letterboxd.get_list("https://letterboxd.com/apurvakoti/list/hype/share/tok123/")
+    letterboxd.get_list("https://letterboxd.com/exampleuser/list/hype/share/tok123/")
 
     assert calls[-1].endswith("?page=2")  # the fallback was actually tried, not skipped
 
@@ -109,7 +109,7 @@ def test_get_list_stops_on_duplicate_page_content_without_double_counting(monkey
         return fake_html_response("letterboxd_list_hype.html")  # same content every real hit
 
     monkeypatch.setattr(letterboxd.requests, "get", fake_get)
-    films = letterboxd.get_list("https://letterboxd.com/apurvakoti/list/hype/share/tok123/", max_pages=10)
+    films = letterboxd.get_list("https://letterboxd.com/exampleuser/list/hype/share/tok123/", max_pages=10)
 
     assert len(films) == 1  # not 2 - the repeated page wasn't counted as new
 

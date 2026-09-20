@@ -1,3 +1,4 @@
+import json
 from datetime import date, timedelta
 
 import fandango
@@ -11,6 +12,59 @@ def test_normalize_folds_ampersand_to_and():
 
 def test_normalize_strips_diacritics():
     assert fandango._normalize("Alejandro G. Iñárritu") == "alejandro g inarritu"
+
+
+def test_looks_blocked_detects_marker_and_empty_body():
+    assert fandango._looks_blocked(_FakeResp("...A Message To Our Fans...")) is True
+    assert fandango._looks_blocked(_FakeResp("")) is True
+    assert fandango._looks_blocked(_FakeResp("   ")) is True  # whitespace-only counts as empty
+    assert fandango._looks_blocked(_FakeResp('{"hasShowtimes": false}')) is False
+
+
+def test_get_with_retry_backs_off_exponentially_between_attempts(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(fandango.time, "sleep", lambda s: sleeps.append(s))
+
+    session = FakeSession(lambda url, params: _FakeResp(""))  # always blocked
+    fandango._get_with_retry(session, "https://example.test/x")
+
+    assert len(session.calls) == fandango.RETRY_ATTEMPTS
+    assert sleeps == [
+        fandango.RETRY_BASE_DELAY_SECONDS * (2**0),
+        fandango.RETRY_BASE_DELAY_SECONDS * (2**1),
+    ]
+    assert sleeps[1] > sleeps[0]  # genuinely increasing, not a fixed delay
+
+
+def test_get_with_retry_stops_as_soon_as_a_clean_response_arrives(monkeypatch):
+    monkeypatch.setattr(fandango.time, "sleep", lambda s: None)
+    responses = iter([_FakeResp(""), _FakeResp('{"ok": true}')])
+    session = FakeSession(lambda url, params: next(responses))
+
+    resp = fandango._get_with_retry(session, "https://example.test/x")
+    assert resp.text == '{"ok": true}'
+    assert len(session.calls) == 2  # didn't burn the 3rd retry once it succeeded
+
+
+def test_search_movie_retries_a_blocked_response(monkeypatch):
+    """Confirms the shared retry helper is actually wired into search_movie,
+    not just check_ticket_status - any Fandango endpoint here is equally
+    exposed to the same intermittent block."""
+    monkeypatch.setattr(fandango.time, "sleep", lambda s: None)
+    responses = iter([_FakeResp(""), fake_html_response("fandango_search_vertigo.html")])
+    session = FakeSession(lambda url, params: next(responses))
+
+    candidates = fandango.search_movie(session, "vertigo")
+    assert any(c.title == "Vertigo" for c in candidates)
+
+
+class _FakeResp:
+    def __init__(self, text):
+        self.text = text
+        self.status_code = 200
+
+    def raise_for_status(self):
+        pass
 
 
 def test_search_movie_scoped_to_results_not_promo_carousel(monkeypatch):
@@ -189,7 +243,7 @@ def test_check_ticket_status_skips_a_date_still_malformed_after_retries(monkeypa
     monkeypatch.setattr(fandango.time, "sleep", lambda s: None)
 
     responses = iter(
-        [_FakeBadJsonResponse()] * (fandango.MALFORMED_RESPONSE_RETRIES + 1)  # day 0: bad every attempt
+        [_FakeBadJsonResponse()] * fandango.RETRY_ATTEMPTS  # day 0: bad every attempt (initial + all retries)
         + [_FakeJsonResponse(_showtime_response([_theater("Alamo Drafthouse", [{"type": "available", "isSoldOut": False}])]))]  # day 1: fine
     )
     session = FakeSession(lambda url, params: next(responses))
@@ -222,6 +276,7 @@ class _FakeJsonResponse:
     def __init__(self, data):
         self._data = data
         self.status_code = 200
+        self.text = json.dumps(data)
 
     def raise_for_status(self):
         pass
@@ -235,11 +290,12 @@ class _FakeBadJsonResponse:
     empty-body case without needing an actual malformed-JSON fixture."""
 
     status_code = 200
+    text = ""  # empty body - not valid JSON, and doesn't contain BLOCK_PAGE_MARKER either
 
     def raise_for_status(self):
         pass
 
     def json(self):
-        import json
+        import json as _json
 
-        json.loads("")  # raises json.JSONDecodeError, a ValueError subclass
+        _json.loads("")  # raises json.JSONDecodeError, a ValueError subclass

@@ -41,12 +41,46 @@ AMBIGUITY_GAP = 0.05
 # G. Iñárritu" vs "Alejandro González Iñárritu"), so director comparison is fuzzy too.
 DIRECTOR_MATCH_THRESHOLD = 0.6
 
+# Fandango (via Akamai's bot-management) can intermittently serve either an
+# HTML "A Message To Our Fans" block page, or a plain empty 200 body, instead
+# of the real response - on any endpoint here, confirmed transient in
+# production (a request that got blocked once succeeded cleanly moments later
+# from the same environment, no other change). Every Fandango request in this
+# module retries through _get_with_retry rather than each call rolling its
+# own - treating either symptom as a real "empty" answer would be worse than
+# crashing: it can't be told apart from "genuinely nothing here" without
+# retrying first.
+BLOCK_PAGE_MARKER = "A Message To Our Fans"
+RETRY_ATTEMPTS = 3  # 1 initial try + 2 retries
+RETRY_BASE_DELAY_SECONDS = 1.5
+
+
+def _looks_blocked(resp):
+    return BLOCK_PAGE_MARKER in resp.text or not resp.text.strip()
+
+
+def _get_with_retry(session, url, **kwargs):
+    """GET with exponential backoff (1.5s, 3s, ...) against a blocked/empty
+    response (see _looks_blocked). Returns the last response tried even if
+    still blocked after every retry - callers already handle "couldn't get
+    real data" as their normal no-data-found path, so this doesn't need its
+    own separate failure mode."""
+    kwargs.setdefault("timeout", 15)
+    resp = None
+    for attempt in range(RETRY_ATTEMPTS):
+        resp = session.get(url, **kwargs)
+        if not _looks_blocked(resp):
+            return resp
+        if attempt < RETRY_ATTEMPTS - 1:
+            time.sleep(RETRY_BASE_DELAY_SECONDS * (2**attempt))
+    return resp
+
 
 def new_session():
     """A requests.Session that's visited fandango.com so it holds valid cookies."""
     session = requests.Session()
     session.headers.update(HEADERS)
-    session.get(BASE_URL + "/", timeout=15)
+    _get_with_retry(session, BASE_URL + "/")
     return session
 
 
@@ -59,7 +93,7 @@ def search_movie(session, title):
     """
     from bs4 import BeautifulSoup
 
-    resp = session.get(f"{BASE_URL}/search", params={"q": title}, timeout=15)
+    resp = _get_with_retry(session, f"{BASE_URL}/search", params={"q": title})
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -104,7 +138,7 @@ def get_director(session, fandango_slug):
     director credited or the page can't be parsed - disambiguation callers
     treat that as "can't use this signal", not fatal.
     """
-    resp = session.get(f"{BASE_URL}/{fandango_slug}/movie-overview", timeout=15)
+    resp = _get_with_retry(session, f"{BASE_URL}/{fandango_slug}/movie-overview")
     resp.raise_for_status()
     match = DIRECTOR_RE.search(resp.text)
     if not match:
@@ -123,7 +157,7 @@ def get_release_date(session, fandango_slug):
     often to check, not a direct answer. Returns a date, or None if the page doesn't
     have one (rare, but shouldn't be fatal to the caller).
     """
-    resp = session.get(f"{BASE_URL}/{fandango_slug}/movie-overview", timeout=15)
+    resp = _get_with_retry(session, f"{BASE_URL}/{fandango_slug}/movie-overview")
     resp.raise_for_status()
     match = RELEASE_DATE_RE.search(resp.text)
     return date.fromisoformat(match.group(1)) if match else None
@@ -191,38 +225,20 @@ RELEASE_WINDOW_BEFORE_DAYS = 7
 RELEASE_WINDOW_AFTER_DAYS = 7
 
 
-MALFORMED_RESPONSE_RETRIES = 2
-MALFORMED_RESPONSE_RETRY_DELAY_SECONDS = 1.5
-
-
 def _showtime_grouping(session, fandango_id, zip_code, check_date, referer):
-    """One date's raw response, or None for "no usable data this date".
-
-    Retries a non-JSON 200 response before giving up on it. Seen for real in
-    production: Fandango (via Akamai's bot-management) can serve an HTML "A
-    Message To Our Fans" block page instead of the real API response,
-    apparently probabilistic/reputation-based rather than a hard IP ban - a
-    request that got blocked once succeeded cleanly moments later from the
-    same environment with no other change. Silently treating a blocked
-    response as "no data" would be worse than the thing this project exists
-    to prevent: it can't tell "genuinely nothing on sale" from "we got
-    blocked and never actually found out" without retrying first.
-    """
+    """One date's raw response, or None for "no usable data this date" - a
+    clean {"hasShowtimes": false}, or (after _get_with_retry has already
+    retried a block page) a residual non-JSON body from some other cause."""
     url = f"{BASE_URL}/napi/theaterShowtimeGroupings/{fandango_id}/{check_date}"
-    params = {"zip": zip_code, "isdesktop": "true", "limit": 5}
-    headers = {"Accept": "application/json", "Referer": referer}
-
-    for attempt in range(MALFORMED_RESPONSE_RETRIES + 1):
-        resp = session.get(url, params=params, headers=headers, timeout=15)
-        resp.raise_for_status()
-        try:
-            data = resp.json()
-            break
-        except ValueError:
-            if attempt < MALFORMED_RESPONSE_RETRIES:
-                time.sleep(MALFORMED_RESPONSE_RETRY_DELAY_SECONDS)
-                continue
-            return None  # still malformed after retries - genuinely give up on this date
+    resp = _get_with_retry(
+        session, url, params={"zip": zip_code, "isdesktop": "true", "limit": 5},
+        headers={"Accept": "application/json", "Referer": referer},
+    )
+    resp.raise_for_status()
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
     return data if data.get("hasShowtimes") else None
 
 

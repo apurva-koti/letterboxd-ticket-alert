@@ -75,7 +75,7 @@ modal secret create gmail-credentials \
 
 modal secret create app-config \
   LETTERBOXD_USERNAME=your-username \
-  ZIP_CODE=94158 \
+  ZIP_CODE=10001 \
   HYPE_LIST_URL="https://letterboxd.com/you/list/hype/share/token/"
 
 modal deploy modal_app.py
@@ -122,6 +122,21 @@ the full `letterboxd.com/.../share/<token>/` URL it redirects to) as
 **first page** (~28 films) - `/page/2/` 403s on that URL specifically (a
 plain public list doesn't have this limit). Keep Hype small and curated and
 this never matters.
+
+## Resilience
+
+Fandango (via Akamai's bot-management) can intermittently serve an HTML
+block page - or a plain empty body - instead of a real response, on any of
+its endpoints this project calls. Confirmed transient in production, not a
+persistent IP ban: a blocked request succeeded cleanly moments later with no
+other change. Every Fandango request retries through one shared helper
+(`fandango._get_with_retry`) with exponential backoff (1.5s, 3s) before
+giving up on that one request - never treated as a silent "nothing found,"
+since that would be worse than crashing for a project whose whole point is
+not missing an on-sale event. `modal_app.py` also pins the deployed function
+to `region="us"`, since these are all US-facing sites and requests that look
+like ordinary US traffic are plausibly less likely to trip that block in the
+first place - a complement to the retry logic, not a replacement for it.
 
 ## Diagnosing "why isn't X being tracked/alerted"
 

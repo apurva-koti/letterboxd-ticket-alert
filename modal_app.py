@@ -58,6 +58,14 @@ app_config_secret = modal.Secret.from_name("app-config")
     secrets=[gmail_secret, app_config_secret],
     schedule=modal.Cron("*/15 * * * *"),
     timeout=600,
+    # Fandango/Letterboxd/Box Office Mojo are all US-facing sites; pinning to
+    # "us" (broad, not a narrower sub-region, for better resource
+    # availability - see Modal's own region-selection guidance) keeps
+    # outgoing requests looking like ordinary US traffic, which plausibly
+    # reduces how often Fandango's bot-management blocks them in the first
+    # place - a complement to the retry-with-backoff in fandango.py, not a
+    # replacement for it, since a block is possible from any region.
+    region="us",
 )
 def run_scheduler():
     import config
