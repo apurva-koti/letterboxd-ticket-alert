@@ -186,42 +186,71 @@ STATUS_ON_SALE = "on_sale"
 STATUS_SHOWTIMES_ANNOUNCED = "showtimes_announced"
 
 
-def check_ticket_status(session, fandango_id, fandango_slug, zip_code, days_ahead=14):
-    """Checks a rolling window of upcoming dates for showtimes near zip_code, and
-    classifies what's found into two distinct states rather than one on/off signal:
+RELEASE_WINDOW_BEFORE_DAYS = 7
+RELEASE_WINDOW_AFTER_DAYS = 7
+
+
+def _showtime_grouping(session, fandango_id, zip_code, check_date, referer):
+    """One date's raw response, or None for "no usable data this date" -
+    covers both a clean {"hasShowtimes": false} and Fandango's occasional
+    200-with-empty-body flakiness (seen in production), which is otherwise
+    indistinguishable from "nothing scheduled" as far as this caller's
+    concerned."""
+    resp = session.get(
+        f"{BASE_URL}/napi/theaterShowtimeGroupings/{fandango_id}/{check_date}",
+        params={"zip": zip_code, "isdesktop": "true", "limit": 5},
+        headers={"Accept": "application/json", "Referer": referer},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    return data if data.get("hasShowtimes") else None
+
+
+def check_ticket_status(session, fandango_id, fandango_slug, zip_code, release_date=None, days_ahead=14):
+    """Checks upcoming dates for showtimes near zip_code, and classifies what's
+    found into two distinct states rather than one on/off signal:
 
     - STATUS_ON_SALE: at least one theater has a showtime that's actually purchasable
     - STATUS_SHOWTIMES_ANNOUNCED: showtimes are listed (a date/time exists) but every
       one of them is pre-sale ("restricted") - useful to track on its own since
       whether that's worth alerting on is a judgment call, not automatic.
 
-    Fandango only has showtime data for the near term (tickets typically go on sale
-    1-3 weeks before a screening), so scanning further out than that isn't useful.
+    Scans the near-term window (today through today+days_ahead-1) - but that
+    alone is NOT enough. Confirmed by hand on a real tentpole (Dune: Part
+    Three, ~90 days from release): the near-term window was completely empty,
+    while real, purchasable showtimes (type "available") already existed
+    around its actual release date, months out. Fandango evidently populates
+    opening-weekend showtimes for a big release well before ordinary daily
+    listings fill in for the days in between - the earlier assumption that
+    Fandango "only has near-term data" was simply wrong for this case. So
+    when release_date is known and falls outside the near-term window, a
+    second window around release_date (-7/+7 days) is scanned too. This
+    roughly doubles requests for a film that far out, but that's the exact
+    case (a hyped release with tickets already live) this project exists to
+    catch - see the Hype/must_watch tier, which is precisely for films where
+    missing this would matter most.
 
-    Returns None if no theater/showtime data at all in the window, else a TicketStatusResult.
+    Returns None if no theater/showtime data in either window, else a TicketStatusResult.
     """
     referer = f"{BASE_URL}/{fandango_slug}/movie-overview"
     today = date.today()
 
-    for offset in range(days_ahead):
-        check_date = (today + timedelta(days=offset)).isoformat()
-        resp = session.get(
-            f"{BASE_URL}/napi/theaterShowtimeGroupings/{fandango_id}/{check_date}",
-            params={"zip": zip_code, "isdesktop": "true", "limit": 5},
-            headers={"Accept": "application/json", "Referer": referer},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        try:
-            data = resp.json()
-        except ValueError:
-            # Seen in production: an occasional 200 with an empty/non-JSON
-            # body for one date - Fandango's own flakiness, not something
-            # worth failing the whole check over. Treat this one date as "no
-            # data" and keep scanning the rest of the window.
-            continue
+    dates_to_check = [today + timedelta(days=offset) for offset in range(days_ahead)]
 
-        if not data.get("hasShowtimes"):
+    if release_date and (release_date - today).days >= days_ahead:
+        window_start = release_date - timedelta(days=RELEASE_WINDOW_BEFORE_DAYS)
+        dates_to_check += [
+            window_start + timedelta(days=offset)
+            for offset in range(RELEASE_WINDOW_BEFORE_DAYS + RELEASE_WINDOW_AFTER_DAYS + 1)
+        ]
+
+    for check_date in dates_to_check:
+        data = _showtime_grouping(session, fandango_id, zip_code, check_date.isoformat(), referer)
+        if not data:
             continue
 
         on_sale_theaters = set()
@@ -244,7 +273,7 @@ def check_ticket_status(session, fandango_id, fandango_slug, zip_code, days_ahea
 
         if on_sale_theaters or showtimes_only_theaters:
             return TicketStatusResult(
-                date=check_date,
+                date=check_date.isoformat(),
                 status=STATUS_ON_SALE if on_sale_theaters else STATUS_SHOWTIMES_ANNOUNCED,
                 on_sale_theaters=sorted(on_sale_theaters),
                 showtimes_only_theaters=sorted(showtimes_only_theaters),

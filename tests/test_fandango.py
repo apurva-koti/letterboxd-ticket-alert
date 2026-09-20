@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 import fandango
 
@@ -135,6 +135,50 @@ def test_check_ticket_status_mixed_theaters_bucket_separately():
     assert result.status == fandango.STATUS_ON_SALE  # on_sale wins if any theater has it
     assert result.on_sale_theaters == ["On Sale Cinema"]
     assert result.showtimes_only_theaters == ["Announced Only Cinema"]
+
+
+def test_check_ticket_status_also_scans_around_a_far_off_release_date():
+    """Real production bug found and fixed: for a film whose release is
+    beyond the near-term window, Fandango can have real purchasable showtimes
+    already posted around the release date itself, with nothing in between -
+    confirmed on Dune: Part Three, ~90 days out: the near-term window was
+    completely empty while real on_sale data already existed around its
+    December release."""
+    today = date.today()
+    release_date = today + timedelta(days=90)
+    hit_date = (release_date - timedelta(days=2)).isoformat()  # within the -7/+7 window
+
+    def router(url, params):
+        if hit_date in url:
+            return _FakeJsonResponse(
+                _showtime_response([_theater("Alamo Drafthouse", [{"type": "available", "isSoldOut": False}])])
+            )
+        return _FakeJsonResponse({"hasShowtimes": False, "theaterShowtimes": {"theaters": []}})
+
+    session = FakeSession(router)
+    result = fandango.check_ticket_status(session, "1", "slug", "94158", release_date=release_date, days_ahead=14)
+
+    assert result is not None
+    assert result.status == fandango.STATUS_ON_SALE
+    assert result.date == hit_date
+
+
+def test_check_ticket_status_skips_release_window_when_release_is_near_term():
+    """If release_date already falls inside the near-term window, there's no
+    separate release-window scan needed - the near-term scan already covers it,
+    so no extra requests should be made."""
+    calls = []
+    today = date.today()
+    release_date = today + timedelta(days=5)  # well within days_ahead=14
+
+    def router(url, params):
+        calls.append(url)
+        return _FakeJsonResponse({"hasShowtimes": False, "theaterShowtimes": {"theaters": []}})
+
+    session = FakeSession(router)
+    fandango.check_ticket_status(session, "1", "slug", "94158", release_date=release_date, days_ahead=14)
+
+    assert len(calls) == 14  # only the near-term window - no extra release-window dates
 
 
 def test_check_ticket_status_skips_a_date_with_malformed_json_instead_of_crashing():

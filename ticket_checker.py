@@ -1,12 +1,13 @@
 """Syncs a Letterboxd watchlist, matches films to Fandango, and checks ticket status.
 
-Alerts (currently just printed - SMS comes later) fire only on the transition into
-on_sale from anything else, so a movie that stays on_sale across runs, or sits at
-showtimes_announced indefinitely, doesn't get texted about repeatedly.
+should_alert fires only on the transition into on_sale from anything else, so
+a movie that stays on_sale across runs, or sits at showtimes_announced
+indefinitely, doesn't trigger a repeat email (actual sending happens in
+modal_app.py, off state.get_unnotified_on_sale - see its docstring).
 """
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import boxofficemojo
 import fandango
@@ -121,7 +122,10 @@ def check_film(conn, session, film, zip_code, tier=None, next_check_at=None):
     if not match or not match.fandango_id:
         return None
 
-    result = fandango.check_ticket_status(session, match.fandango_id, match.fandango_slug, zip_code)
+    release_date = date.fromisoformat(match.release_date) if match.release_date else None
+    result = fandango.check_ticket_status(
+        session, match.fandango_id, match.fandango_slug, zip_code, release_date=release_date
+    )
     new_status = result.status if result else "none"
 
     previous = state.get_ticket_status(conn, film.slug)

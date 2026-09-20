@@ -110,7 +110,7 @@ def _fake_get_or_match(conn, session, film, is_hype=False):
     )
 
 
-def _fake_check_ticket_status(session, fandango_id, fandango_slug, zip_code, days_ahead=14):
+def _fake_check_ticket_status(session, fandango_id, fandango_slug, zip_code, release_date=None, days_ahead=14):
     for slug, m in REAL_MATCHES.items():
         if m["fandango_id"] == fandango_id:
             return REAL_STATUSES[slug]
