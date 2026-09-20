@@ -40,6 +40,19 @@ AMBIGUITY_GAP = 0.05
 # Letterboxd and Fandango credit directors with different name forms (e.g. "Alejandro
 # G. Iñárritu" vs "Alejandro González Iñárritu"), so director comparison is fuzzy too.
 DIRECTOR_MATCH_THRESHOLD = 0.6
+# A candidate whose Fandango year is more than this many years off Letterboxd's
+# also needs director confirmation, even as the sole/uncontested top candidate
+# on title score alone - a real mismatch caught in production: "Center Stage"
+# (1991, Letterboxd) confidently matched Fandango's unrelated "Center Stage"
+# (2000) since nothing else was cataloged under that exact title to tie
+# against. A large year gap is ambiguous on title alone either way - it's
+# equally the shape of a genuine re-release (e.g. Top Gun 1986 vs. a Fandango
+# listing dated for a 2026 re-release), so this can't simply reject a big gap
+# outright; it demands the same director check a tie already gets, not a
+# free pass. Kept above the existing +0.05 soft-nudge window (see match_movie)
+# so an ordinary festival-year-vs-theatrical-year gap of a year or two doesn't
+# trigger an extra request.
+YEAR_DISAMBIGUATION_THRESHOLD = 2
 
 # Fandango (via Akamai's bot-management) can intermittently serve either an
 # HTML "A Message To Our Fans" block page, or a plain empty 200 body, instead
@@ -166,14 +179,17 @@ def get_release_date(session, fandango_slug):
 def match_movie(session, title, year=None, director=None):
     """Finds the best Fandango candidate for a Letterboxd title.
 
-    `director`, when given, is only used to break ties between candidates whose
-    title-similarity scores are within AMBIGUITY_GAP of each other (e.g. a movie
-    and its anniversary re-release, or two same-titled films) - it costs an extra
-    request per close candidate, so it's not fetched unless there's a tie to break.
+    `director`, when given, is used to break ties between candidates whose
+    title-similarity scores are within AMBIGUITY_GAP of each other (e.g. two
+    same-titled films), and also to confirm a sole top candidate whose year is
+    more than YEAR_DISAMBIGUATION_THRESHOLD off Letterboxd's (see its
+    docstring) - it costs an extra request per candidate checked, so it's only
+    fetched when one of these makes the match actually ambiguous.
 
-    Returns (match, candidates). `match` is None when nothing clears MATCH_THRESHOLD,
-    or candidates are still tied after the director check - caller should treat that
-    as "needs manual review", not silently pick one.
+    Returns (match, candidates). `match` is None when nothing clears
+    MATCH_THRESHOLD, or a candidate needing director confirmation didn't get
+    it (no director given, or it didn't match) - caller should treat that as
+    "needs manual review", not silently pick one.
     """
     candidates = search_movie(session, title)
     if not candidates:
@@ -196,19 +212,20 @@ def match_movie(session, title, year=None, director=None):
         return None, candidates
 
     tied = [c for s, c in scored if top_score - s <= AMBIGUITY_GAP]
+    year_suspicious = year and top.year and abs(top.year - year) > YEAR_DISAMBIGUATION_THRESHOLD
 
-    if len(tied) > 1 and director:
+    if len(tied) > 1 or year_suspicious:
+        to_check = tied if len(tied) > 1 else [top]
+        if not director:
+            return None, candidates
         target_director = _normalize(director)
         director_matches = []
-        for c in tied:
+        for c in to_check:
             d = get_director(session, c.slug)
             if d and SequenceMatcher(None, target_director, _normalize(d)).ratio() >= DIRECTOR_MATCH_THRESHOLD:
                 director_matches.append(c)
         if len(director_matches) == 1:
             return director_matches[0], candidates
-        return None, candidates
-
-    if len(tied) > 1:
         return None, candidates
 
     return top, candidates
