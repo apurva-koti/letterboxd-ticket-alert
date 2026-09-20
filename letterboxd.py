@@ -158,23 +158,42 @@ def get_list(list_url, delay=0.5, max_pages=None):
 
     list_url can be a plain public list URL or a private list's share-token
     URL (https://letterboxd.com/<user>/list/<slug>/share/<token>/, from a
-    boxd.it short link). Verified by hand: a share-token URL only serves its
-    first page - appending /page/N/ 403s there (not 404), even though the
-    same pattern works fine for a plain public list or the watchlist. Both
-    403 and 404 are treated as "no more pages" here, so a share-linked list
-    just silently caps at one page's worth of films (~28) rather than
-    crashing - fine for a small curated list, but worth knowing about if
-    "Hype" (or similar) ever grows past that.
+    boxd.it short link). Verified by hand against a real share-token URL:
+
+    - Page 1 has to be the bare URL - appending /page/1/ 403s there even
+      though it's identical content to the bare URL.
+    - .../page/N/ for N>1 also 403s on a share-token URL specifically (a
+      plain public list paginates fine this way, same as the watchlist).
+    - .../?page=N as a query param returns 200 there instead of 403 - but
+      with only one film in the real list this was tested against, its
+      content was byte-identical to page 1, so it's NOT confirmed whether
+      Letterboxd actually honors that param for a share-token view or just
+      silently ignores it and re-serves page 1. Duplicate-page detection
+      below guards against that ambiguity: if a "later page" comes back
+      identical (by slug set) to the page before it, that's treated as the
+      real end, not counted twice.
+
+    Net effect: path-based pagination is tried first (proven for public
+    lists), falling back to the query-param form on a 403; a 403/404 on
+    either, or a duplicate page, ends pagination. A share-linked list still
+    likely caps out somewhere - just less certain exactly where than the
+    initial "one page only" finding suggested.
     """
     films = []
+    previous_slugs = None
     page = 1
     base = list_url.rstrip("/")
     while True:
         # Page 1 has to be the bare URL, not .../page/1/ - confirmed by hand
         # that a share-token URL 403s on /page/1/ even though the identical
-        # content is served at the bare URL. Only later pages use /page/N/.
+        # content is served at the bare URL.
         url = f"{base}/" if page == 1 else f"{base}/page/{page}/"
         resp = requests.get(url, headers=HEADERS, timeout=15)
+
+        if resp.status_code == 403 and page > 1:
+            url = f"{base}/?page={page}"  # untested fallback - see docstring
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+
         if resp.status_code in (403, 404):
             break
         resp.raise_for_status()
@@ -182,6 +201,11 @@ def get_list(list_url, delay=0.5, max_pages=None):
         page_films = _parse_page(resp.text)
         if not page_films:
             break
+
+        page_slugs = {f.slug for f in page_films}
+        if page_slugs == previous_slugs:
+            break  # same content as the page before - not real pagination
+        previous_slugs = page_slugs
 
         films.extend(page_films)
         page += 1
