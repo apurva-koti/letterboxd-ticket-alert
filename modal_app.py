@@ -128,6 +128,8 @@ def run_scheduler():
         for outcome in result["checked"]:
             tier_counts[outcome.tier] = tier_counts.get(outcome.tier, 0) + 1
         logger.info(f"Tier breakdown this run: {tier_counts}")
+        for outcome in result["checked"]:
+            logger.info(f"  Checked: {outcome.film.title} ({outcome.film.year}) [{outcome.tier}] -> {outcome.new_status}")
 
     for f in result["added"]:
         logger.info(f"Watchlist added: {f.title} ({f.year})")
