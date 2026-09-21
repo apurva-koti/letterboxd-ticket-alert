@@ -18,11 +18,23 @@ import logging
 import time
 
 import modal
+import requests
 
 DB_PATH = "/data/state.db"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("letterboxd-ticket-alert")
+
+
+def _is_transient_network_error(exc):
+    """True for a plain connectivity hiccup (a request that timed out, or
+    couldn't connect at all) talking to Letterboxd/Fandango/Box Office Mojo -
+    confirmed repeatedly in production to self-heal within one or two 15-min
+    cron cycles with no intervention needed, so not worth an email. Deliberately
+    narrower than "any requests exception": an HTTPError (a real 4xx/5xx, e.g.
+    a site structure change or a hard block) or anything else still emails -
+    those aren't "the network hiccuped," they're worth a human actually looking."""
+    return isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError))
 
 app = modal.App("letterboxd-ticket-alert")
 
@@ -97,7 +109,15 @@ def run_scheduler():
                 logger.info(f"Email sent: {notification.film.title} ({notification.film.year}) - {theaters}")
             except Exception:
                 logger.exception(f"Email failed for {notification.film.title} - will retry next run")
-    except Exception:
+    except Exception as e:
+        if _is_transient_network_error(e):
+            # Logged (visible in the Modal dashboard) and still re-raised so
+            # Modal marks the invocation as errored there too - just not
+            # emailed, since this class of failure isn't actionable and
+            # clears up on its own well before a human could do anything
+            # about it anyway.
+            logger.warning(f"Run failed on a transient network error, not emailing: {e!r}")
+            raise
         logger.exception("Run failed")
         # A crashed run wouldn't otherwise be visible anywhere but the Modal
         # dashboard - best-effort email it directly too, since "just email me
