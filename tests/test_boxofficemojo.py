@@ -1,8 +1,10 @@
 from datetime import date
 
+import requests
+
 import boxofficemojo
 
-from conftest import fake_html_response, fixture_html
+from conftest import FakeResponse, fake_html_response, fixture_html
 
 
 def _route(url, params=None, headers=None, timeout=None):
@@ -46,3 +48,42 @@ def test_find_release_date_rejects_low_similarity_match(monkeypatch):
 def test_find_release_date_none_when_no_candidates(monkeypatch):
     monkeypatch.setattr(boxofficemojo, "search_title", lambda title: [])
     assert boxofficemojo.find_release_date("Some Obscure Title") is None
+
+
+def test_get_with_retry_retries_a_server_error(monkeypatch):
+    monkeypatch.setattr(boxofficemojo.time, "sleep", lambda s: None)
+    responses = iter([FakeResponse(status_code=500), FakeResponse(text="ok", status_code=200)])
+    monkeypatch.setattr(boxofficemojo.requests, "get", lambda url, **kw: next(responses))
+
+    resp = boxofficemojo._get_with_retry("https://example.test/x")
+    assert resp.status_code == 200
+
+
+def test_get_with_retry_retries_a_connection_exception(monkeypatch):
+    monkeypatch.setattr(boxofficemojo.time, "sleep", lambda s: None)
+    calls = []
+
+    def fake_get(url, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise requests.exceptions.ConnectionError("refused")
+        return FakeResponse(text="ok", status_code=200)
+
+    monkeypatch.setattr(boxofficemojo.requests, "get", fake_get)
+
+    resp = boxofficemojo._get_with_retry("https://example.test/x")
+    assert resp.status_code == 200
+    assert len(calls) == 2
+
+
+def test_get_with_retry_raises_when_every_attempt_fails_to_connect(monkeypatch):
+    monkeypatch.setattr(boxofficemojo.time, "sleep", lambda s: None)
+    monkeypatch.setattr(
+        boxofficemojo.requests, "get", lambda url, **kw: (_ for _ in ()).throw(requests.exceptions.ReadTimeout("timed out"))
+    )
+
+    try:
+        boxofficemojo._get_with_retry("https://example.test/x")
+        assert False, "expected ReadTimeout to propagate"
+    except requests.exceptions.ReadTimeout:
+        pass

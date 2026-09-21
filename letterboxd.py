@@ -19,6 +19,48 @@ HEADERS = {
     )
 }
 
+# Confirmed in production: a plain Letterboxd 500 and a read timeout both
+# self-healed within the next cron cycle or two on their own with no action
+# needed. This project runs every 15 minutes, so failing an entire run
+# outright on the very first hiccup - as every call here used to, with zero
+# retry - is far more disruptive than spending a few seconds on backoff
+# first. Mirrors fandango.py's own retry helper.
+RETRY_ATTEMPTS = 3  # 1 initial try + 2 retries
+RETRY_BASE_DELAY_SECONDS = 1.5
+
+
+def _get_with_retry(url, **kwargs):
+    """GET with exponential backoff (1.5s, 3s) against a connection failure
+    (timeout, refused, DNS, etc.) or a 5xx from Letterboxd's own server.
+
+    A 4xx is returned immediately, untouched, not retried - get_watchlist's
+    404 and get_list's 403/404 are meaningful "no more pages" signals here,
+    not errors, so retrying or otherwise special-casing them would be wrong.
+
+    Raises the underlying exception if every attempt failed to connect at
+    all; otherwise always returns a Response, even a still-5xx one if every
+    retry was similarly unlucky - the caller's own raise_for_status() is
+    what surfaces that as a real error at that point.
+    """
+    kwargs.setdefault("headers", HEADERS)
+    kwargs.setdefault("timeout", 15)
+    resp = None
+    last_exc = None
+    for attempt in range(RETRY_ATTEMPTS):
+        try:
+            resp = requests.get(url, **kwargs)
+            last_exc = None
+            if resp.status_code < 500:
+                return resp
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+            resp = None
+        if attempt < RETRY_ATTEMPTS - 1:
+            time.sleep(RETRY_BASE_DELAY_SECONDS * (2**attempt))
+    if resp is None:
+        raise last_exc
+    return resp
+
 NAME_YEAR_RE = re.compile(r"^(.*)\s\((\d{4})\)$")
 DIRECTOR_RE = re.compile(r'"director":\[\{"@type":"Person","name":"((?:[^"\\]|\\.)*)"')
 # The JSON-LD "image" field, not to be confused with the page's og:image/
@@ -92,7 +134,7 @@ def get_film_info(slug, today=None):
 
     Returns a LetterboxdInfo.
     """
-    resp = requests.get(f"{BASE_URL}/film/{slug}/", headers=HEADERS, timeout=15)
+    resp = _get_with_retry(f"{BASE_URL}/film/{slug}/")
     resp.raise_for_status()
     html = resp.text
     soup = BeautifulSoup(html, "html.parser")
@@ -169,7 +211,7 @@ def get_watchlist(username, delay=0.5, max_pages=None):
     page = 1
     while True:
         url = f"{BASE_URL}/{username}/watchlist/page/{page}/"
-        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp = _get_with_retry(url)
         if resp.status_code == 404:
             break
         resp.raise_for_status()
@@ -223,11 +265,11 @@ def get_list(list_url, delay=0.5, max_pages=None):
         # that a share-token URL 403s on /page/1/ even though the identical
         # content is served at the bare URL.
         url = f"{base}/" if page == 1 else f"{base}/page/{page}/"
-        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp = _get_with_retry(url)
 
         if resp.status_code == 403 and page > 1:
             url = f"{base}/?page={page}"  # untested fallback - see docstring
-            resp = requests.get(url, headers=HEADERS, timeout=15)
+            resp = _get_with_retry(url)
 
         if resp.status_code in (403, 404):
             break

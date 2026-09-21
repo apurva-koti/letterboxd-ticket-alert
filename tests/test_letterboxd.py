@@ -6,6 +6,62 @@ from conftest import FakeResponse, fake_html_response, fixture_html
 from models import Film
 
 
+def test_get_with_retry_retries_a_server_error(monkeypatch):
+    """Regression test for a real production incident: a plain Letterboxd 500
+    used to fail the entire run on the very first hit, since nothing here
+    retried at all. A 5xx should be retried like a connection failure, not
+    treated as immediately fatal."""
+    monkeypatch.setattr(letterboxd.time, "sleep", lambda s: None)
+    responses = iter([FakeResponse(status_code=500), FakeResponse(text="ok", status_code=200)])
+    monkeypatch.setattr(letterboxd.requests, "get", lambda url, **kw: next(responses))
+
+    resp = letterboxd._get_with_retry("https://example.test/x")
+    assert resp.status_code == 200
+
+
+def test_get_with_retry_retries_a_connection_exception(monkeypatch):
+    monkeypatch.setattr(letterboxd.time, "sleep", lambda s: None)
+    calls = []
+
+    def fake_get(url, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise letterboxd.requests.exceptions.ConnectionError("refused")
+        return FakeResponse(text="ok", status_code=200)
+
+    monkeypatch.setattr(letterboxd.requests, "get", fake_get)
+
+    resp = letterboxd._get_with_retry("https://example.test/x")
+    assert resp.status_code == 200
+    assert len(calls) == 2
+
+
+def test_get_with_retry_raises_when_every_attempt_fails_to_connect(monkeypatch):
+    monkeypatch.setattr(letterboxd.time, "sleep", lambda s: None)
+
+    def always_fails(url, **kw):
+        raise letterboxd.requests.exceptions.ReadTimeout("timed out")
+
+    monkeypatch.setattr(letterboxd.requests, "get", always_fails)
+
+    try:
+        letterboxd._get_with_retry("https://example.test/x")
+        assert False, "expected ReadTimeout to propagate"
+    except letterboxd.requests.exceptions.ReadTimeout:
+        pass
+
+
+def test_get_with_retry_does_not_retry_a_4xx(monkeypatch):
+    """A 404/403 is a meaningful "no more pages" signal for get_watchlist and
+    get_list, not an error - must be returned immediately, not retried."""
+    calls = []
+    monkeypatch.setattr(letterboxd.requests, "get", lambda url, **kw: calls.append(1) or FakeResponse(status_code=404))
+
+    resp = letterboxd._get_with_retry("https://example.test/x")
+    assert resp.status_code == 404
+    assert len(calls) == 1  # not retried
+
+
 def test_parse_page_extracts_title_year_slug_url():
     films = letterboxd._parse_page(fixture_html("letterboxd_watchlist_page1.html"))
     assert len(films) == 28

@@ -34,6 +34,7 @@ films - those are handled by the slow TIER_RETIRED refresh above instead. The
 list can be private (a boxd.it share link); see README.
 """
 
+import logging
 import random
 import sys
 import time
@@ -44,6 +45,8 @@ import letterboxd
 import state
 import ticket_checker
 from models import Film
+
+logger = logging.getLogger(__name__)
 
 TIER_MUST_WATCH = "must_watch"  # in the Hype list - checked on every run, no matter what
 TIER_HOT = "hot"  # unreleased, <=90 days out - checked most frequently
@@ -119,11 +122,47 @@ def is_due(next_check_at, now):
 
 
 def run(username, zip_code, hype_list_url=None, db_path=state.DB_PATH):
+    """Runs one scheduler pass. Deliberately tolerant of Letterboxd/Fandango/
+    Box Office Mojo being unreachable or erroring at any point - this is
+    invoked every 15 minutes, so a single failed call anywhere shouldn't cost
+    an entire run when the rest of it could still make progress. Concretely:
+
+    - A failed watchlist fetch skips this run's resync (added/removed come
+      back empty) rather than crashing before the per-film loop even starts -
+      whatever's already in the films table from the last successful sync is
+      still checked. A real production incident motivated this: a single
+      Letterboxd 500/timeout used to fail the entire run outright, even
+      though nothing about a stale watchlist actually blocks checking films
+      already known to be tracked.
+    - A failed Fandango session skips ticket-checking for the run entirely
+      (nothing here works without one) but still lets the watchlist resync
+      happen, so added/removed tracking doesn't fall behind during a
+      Fandango-side outage.
+    - Each film's matching+checking is isolated in its own try/except, so one
+      film that fails even after its own internal retries (see
+      fandango._get_with_retry, letterboxd._get_with_retry) doesn't prevent
+      every other due film in the same run from being checked.
+
+    Everything above is on top of each individual request already retrying
+    with backoff - this is the layer above that, for when a failure persists
+    past those retries within a single call.
+    """
     conn = state.connect(db_path)
-    session = fandango.new_session()
     now = datetime.now(timezone.utc)
 
-    watchlist_films = letterboxd.get_watchlist(username)
+    session_ok = True
+    try:
+        session = fandango.new_session()
+    except Exception:
+        logger.warning("Couldn't establish a Fandango session this run - skipping ticket checks", exc_info=True)
+        session = None
+        session_ok = False
+
+    try:
+        watchlist_films = letterboxd.get_watchlist(username)
+    except Exception:
+        logger.warning("Couldn't fetch the watchlist this run - skipping resync, still checking known films", exc_info=True)
+        watchlist_films = None
 
     hype_films = []
     if hype_list_url:
@@ -134,52 +173,59 @@ def run(username, zip_code, hype_list_url=None, db_path=state.DB_PATH):
 
     hype_slugs = {f.slug for f in hype_films}
 
-    # Tracked set is the union - a film only needs to be on *one* of the two
-    # lists. Watchlist entries win on metadata if a film's on both (arbitrary
-    # but harmless - same shape either way).
-    by_slug = {f.slug: f for f in watchlist_films}
-    for f in hype_films:
-        by_slug.setdefault(f.slug, f)
-    all_films = list(by_slug.values())
-
-    added, removed = state.sync_watchlist(conn, all_films)
+    added, removed = [], []
+    if watchlist_films is not None:
+        # Tracked set is the union - a film only needs to be on *one* of the
+        # two lists. Watchlist entries win on metadata if a film's on both
+        # (arbitrary but harmless - same shape either way).
+        by_slug = {f.slug: f for f in watchlist_films}
+        for f in hype_films:
+            by_slug.setdefault(f.slug, f)
+        all_films = list(by_slug.values())
+        added, removed = state.sync_watchlist(conn, all_films)
 
     checked = []
     alerts = []
     processed = 0
 
-    for row in conn.execute("SELECT * FROM films"):
-        film = Film(slug=row["slug"], title=row["title"], year=row["year"], url=row["url"])
-        is_hype = film.slug in hype_slugs
+    if session_ok:
+        for row in conn.execute("SELECT * FROM films"):
+            film = Film(slug=row["slug"], title=row["title"], year=row["year"], url=row["url"])
+            is_hype = film.slug in hype_slugs
 
-        status_row = state.get_ticket_status(conn, film.slug)
-        if status_row and not is_due(status_row.next_check_at, now):
-            continue  # not due - skip without even touching matching
+            status_row = state.get_ticket_status(conn, film.slug)
+            if status_row and not is_due(status_row.next_check_at, now):
+                continue  # not due - skip without even touching matching
 
-        # Hype films are exempt from the cap - "checked every run" is the
-        # whole point of Hype, and the list is meant to stay small/curated
-        # anyway, so it's never the source of a large backlog.
-        if not is_hype and processed >= MAX_PROCESSED_PER_RUN:
-            continue  # backlog too large for one run - picked up on a later run instead
-        processed += 1
+            # Hype films are exempt from the cap - "checked every run" is the
+            # whole point of Hype, and the list is meant to stay small/curated
+            # anyway, so it's never the source of a large backlog.
+            if not is_hype and processed >= MAX_PROCESSED_PER_RUN:
+                continue  # backlog too large for one run - picked up on a later run instead
+            processed += 1
 
-        time.sleep(REQUEST_DELAY_SECONDS)
+            time.sleep(REQUEST_DELAY_SECONDS)
 
-        match = ticket_checker.get_or_match(conn, session, film, is_hype=is_hype)
-        if not match or not match.fandango_id:
-            continue  # still unmatched (or not due for a match retry); nothing to check yet
+            try:
+                match = ticket_checker.get_or_match(conn, session, film, is_hype=is_hype)
+                if not match or not match.fandango_id:
+                    continue  # still unmatched (or not due for a match retry); nothing to check yet
 
-        release_date = date.fromisoformat(match.release_date) if match.release_date else None
-        tier = compute_tier(release_date, today=now.date(), is_hype=is_hype)
-        next_at = next_check_time(tier, now).isoformat()
+                release_date = date.fromisoformat(match.release_date) if match.release_date else None
+                tier = compute_tier(release_date, today=now.date(), is_hype=is_hype)
+                next_at = next_check_time(tier, now).isoformat()
 
-        outcome = ticket_checker.check_film(conn, session, film, zip_code, tier=tier, next_check_at=next_at)
-        if not outcome:
-            continue
+                outcome = ticket_checker.check_film(conn, session, film, zip_code, tier=tier, next_check_at=next_at)
+            except Exception:
+                logger.warning(f"Check failed for {film.title} ({film.year}) - will retry next run", exc_info=True)
+                continue
 
-        checked.append(outcome)
-        if outcome.should_alert:
-            alerts.append(outcome)
+            if not outcome:
+                continue
+
+            checked.append(outcome)
+            if outcome.should_alert:
+                alerts.append(outcome)
 
     return {"added": added, "removed": removed, "checked": checked, "alerts": alerts}
 

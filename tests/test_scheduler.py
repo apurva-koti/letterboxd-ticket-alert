@@ -245,3 +245,82 @@ def test_run_hype_fetch_failure_does_not_break_watchlist_tracking(monkeypatch, t
     result = scheduler.run("fake_user", "94158", hype_list_url="https://letterboxd.com/x/list/hype/", db_path=db_path)
 
     assert {o.film.slug for o in result["checked"]} == {"your-mother-x3"}
+
+
+def test_run_watchlist_fetch_failure_still_checks_already_known_films(monkeypatch, tmp_path):
+    """Regression test for a real production incident: a single Letterboxd
+    500/timeout fetching the watchlist used to fail the entire run outright,
+    before the per-film loop even started - even though a stale watchlist
+    doesn't actually block checking films already known from a prior sync.
+    A failed fetch should just skip this run's resync (added/removed come
+    back empty), not prevent ticket-checking for everything else."""
+    db_path = str(tmp_path / "test.db")
+
+    # First run: watchlist fetch succeeds, films get synced into the DB.
+    films = [make_film(title="Your Mother x3", year=2026, slug="your-mother-x3")]
+    monkeypatch.setattr(letterboxd, "get_watchlist", lambda username, **kw: films)
+    monkeypatch.setattr(fandango, "new_session", lambda: None)
+    monkeypatch.setattr(ticket_checker, "get_or_match", _fake_get_or_match)
+    monkeypatch.setattr(fandango, "check_ticket_status", _fake_check_ticket_status)
+    monkeypatch.setattr(scheduler.time, "sleep", lambda s: None)
+    scheduler.run("fake_user", "94158", db_path=db_path)
+
+    # Second run: watchlist fetch fails outright.
+    monkeypatch.setattr(
+        letterboxd, "get_watchlist", lambda username, **kw: (_ for _ in ()).throw(Exception("500 Server Error"))
+    )
+    # Force the already-synced film to be due again.
+    conn = state.connect(db_path)
+    conn.execute("UPDATE ticket_status SET next_check_at = ?", ((datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),))
+    conn.commit()
+
+    result = scheduler.run("fake_user", "94158", db_path=db_path)
+
+    assert result["added"] == []
+    assert result["removed"] == []
+    assert {o.film.slug for o in result["checked"]} == {"your-mother-x3"}  # still checked despite the failed fetch
+
+
+def test_run_fandango_session_failure_skips_checks_but_still_syncs_watchlist(monkeypatch, tmp_path):
+    """A Fandango-side outage (new_session() itself failing) shouldn't also
+    block the watchlist resync - added/removed tracking should stay current
+    even when ticket-checking can't happen at all this run."""
+    films = [make_film(title="Your Mother x3", year=2026, slug="your-mother-x3")]
+    monkeypatch.setattr(letterboxd, "get_watchlist", lambda username, **kw: films)
+    monkeypatch.setattr(fandango, "new_session", lambda: (_ for _ in ()).throw(Exception("connection refused")))
+    monkeypatch.setattr(scheduler.time, "sleep", lambda s: None)
+
+    db_path = str(tmp_path / "test.db")
+    result = scheduler.run("fake_user", "94158", db_path=db_path)
+
+    assert {f.slug for f in result["added"]} == {"your-mother-x3"}  # sync still happened
+    assert result["checked"] == []  # but nothing could be checked
+    assert result["alerts"] == []
+
+
+def test_run_one_films_failure_does_not_block_the_rest(monkeypatch, tmp_path):
+    """One film raising (e.g. every retry inside get_or_match/check_film
+    already exhausted) shouldn't prevent other due films in the same run
+    from being checked."""
+    films = [
+        make_film(title="Broken Film", year=2026, slug="broken-film"),
+        make_film(title="Your Mother x3", year=2026, slug="your-mother-x3"),
+    ]
+
+    def flaky_get_or_match(conn, session, film, is_hype=False):
+        if film.slug == "broken-film":
+            raise Exception("boom - retries already exhausted")
+        return _fake_get_or_match(conn, session, film, is_hype=is_hype)
+
+    monkeypatch.setattr(letterboxd, "get_watchlist", lambda username, **kw: films)
+    monkeypatch.setattr(fandango, "new_session", lambda: None)
+    monkeypatch.setattr(ticket_checker, "get_or_match", flaky_get_or_match)
+    monkeypatch.setattr(fandango, "check_ticket_status", _fake_check_ticket_status)
+    monkeypatch.setattr(scheduler.time, "sleep", lambda s: None)
+
+    db_path = str(tmp_path / "test.db")
+    result = scheduler.run("fake_user", "94158", db_path=db_path)
+
+    checked_slugs = {o.film.slug for o in result["checked"]}
+    assert checked_slugs == {"your-mother-x3"}  # the broken one didn't take the rest down
+    assert "broken-film" not in checked_slugs

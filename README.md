@@ -132,18 +132,37 @@ this never matters.
 
 ## Resilience
 
-Fandango (via Akamai's bot-management) can intermittently serve an HTML
-block page - or a plain empty body - instead of a real response, on any of
-its endpoints this project calls. Confirmed transient in production, not a
-persistent IP ban: a blocked request succeeded cleanly moments later with no
-other change. Every Fandango request retries through one shared helper
-(`fandango._get_with_retry`) with exponential backoff (1.5s, 3s) before
-giving up on that one request - never treated as a silent "nothing found,"
-since that would be worse than crashing for a project whose whole point is
-not missing an on-sale event. `modal_app.py` also pins the deployed function
-to `region="us"`, since these are all US-facing sites and requests that look
-like ordinary US traffic are plausibly less likely to trip that block in the
-first place - a complement to the retry logic, not a replacement for it.
+This runs every 15 minutes, so tolerating Letterboxd/Fandango/Box Office
+Mojo being flaky matters more than it would for something run once a day.
+Three layers, each guarding against a different scope of failure:
+
+1. **Every request retries.** Fandango (via Akamai's bot-management) can
+   intermittently serve an HTML block page - or a plain empty body - instead
+   of a real response. Letterboxd and Box Office Mojo have both been seen
+   returning a plain 5xx or timing out outright. All three sites go through
+   a per-module `_get_with_retry` helper with exponential backoff (1.5s,
+   3s) before giving up on that one request - covering both a "bad-looking"
+   response and the request itself failing to connect (a timeout or
+   connection error skips this backoff entirely if not explicitly caught,
+   which used to be a real gap).
+2. **A run tolerates a failure that outlasts its own retries.** The
+   watchlist fetch failing doesn't crash the whole run - it just skips that
+   run's resync (added/removed come back empty) while still checking
+   whatever's already tracked from the last successful sync. A Fandango
+   session failing skips ticket-checking for the run but still lets the
+   watchlist resync happen. Each film's matching+checking is isolated in
+   its own try/except, so one film failing doesn't take the rest of that
+   run's batch down with it.
+3. **A failure that isn't actionable doesn't email you.** `modal_app.py`
+   only sends the "run failed" email for something a human could actually
+   do something about - not a plain connectivity hiccup or a 5xx from the
+   site's own server, both confirmed in production to self-heal within a
+   cron cycle or two on their own (see `modal_app._is_transient_failure`).
+
+`modal_app.py` also pins the deployed function to `region="us"`, since
+these are all US-facing sites and requests that look like ordinary US
+traffic are plausibly less likely to trip Fandango's block in the first
+place - a complement to the retry logic, not a replacement for it.
 
 ## Diagnosing "why isn't X being tracked/alerted"
 

@@ -7,6 +7,7 @@ not the JS-rendered /date/ calendar pages or a guessed /release/rl<id>/ URL.
 """
 
 import re
+import time
 from datetime import datetime
 from difflib import SequenceMatcher
 
@@ -26,13 +27,45 @@ TITLE_LINK_RE = re.compile(r"/title/(tt\d+)/")
 # Same "don't guess" principle as the Fandango matcher.
 MATCH_THRESHOLD = 0.85
 
+# Mirrors letterboxd.py/fandango.py's own retry helpers - this project runs
+# every 15 minutes, so a plain connection hiccup or a 5xx from Box Office
+# Mojo's own server shouldn't fail an entire run on the first attempt.
+RETRY_ATTEMPTS = 3  # 1 initial try + 2 retries
+RETRY_BASE_DELAY_SECONDS = 1.5
+
+
+def _get_with_retry(url, **kwargs):
+    """GET with exponential backoff (1.5s, 3s) against a connection failure
+    or a 5xx from Box Office Mojo's own server. Raises the underlying
+    exception if every attempt failed to connect at all; otherwise always
+    returns a Response, even a still-5xx one - the caller's own
+    raise_for_status() is what surfaces that as a real error at that point."""
+    kwargs.setdefault("headers", HEADERS)
+    kwargs.setdefault("timeout", 15)
+    resp = None
+    last_exc = None
+    for attempt in range(RETRY_ATTEMPTS):
+        try:
+            resp = requests.get(url, **kwargs)
+            last_exc = None
+            if resp.status_code < 500:
+                return resp
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+            resp = None
+        if attempt < RETRY_ATTEMPTS - 1:
+            time.sleep(RETRY_BASE_DELAY_SECONDS * (2**attempt))
+    if resp is None:
+        raise last_exc
+    return resp
+
 
 def _normalize(title):
     return re.sub(r"[^a-z0-9 ]", " ", title.lower().replace("&", " and ")).strip()
 
 
 def search_title(title):
-    resp = requests.get(f"{BASE_URL}/search/", params={"q": title}, headers=HEADERS, timeout=15)
+    resp = _get_with_retry(f"{BASE_URL}/search/", params={"q": title})
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -48,7 +81,7 @@ def search_title(title):
 def get_domestic_release_date(imdb_id):
     """Returns the "Domestic" (US) release date from a title's Box Office Mojo
     page, or None if it isn't listed (not yet released, or no US release)."""
-    resp = requests.get(f"{BASE_URL}/title/{imdb_id}/", headers=HEADERS, timeout=15)
+    resp = _get_with_retry(f"{BASE_URL}/title/{imdb_id}/")
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 

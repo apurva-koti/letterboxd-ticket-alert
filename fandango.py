@@ -61,18 +61,34 @@ def _looks_blocked(resp):
 
 def _get_with_retry(session, url, **kwargs):
     """GET with exponential backoff (1.5s, 3s, ...) against a blocked/empty
-    response (see _looks_blocked). Returns the last response tried even if
-    still blocked after every retry - callers already handle "couldn't get
-    real data" as their normal no-data-found path, so this doesn't need its
-    own separate failure mode."""
+    response (see _looks_blocked) AND a genuine connection failure (timeout,
+    refused, DNS, etc.) - the two used to be handled very differently: a
+    blocked-looking 200 retried through this loop, but session.get() itself
+    raising skipped the retry budget entirely and failed on the very first
+    attempt. This runs every 15 minutes, so spending a few seconds of
+    backoff on a plain network hiccup is far cheaper than failing outright.
+
+    Returns the last response tried even if still blocked after every retry
+    - callers already handle "couldn't get real data" as their normal
+    no-data-found path, so this doesn't need its own separate failure mode
+    for that case. Only raises if every attempt failed to connect at all
+    (no response object exists to fall back to)."""
     kwargs.setdefault("timeout", 15)
     resp = None
+    last_exc = None
     for attempt in range(RETRY_ATTEMPTS):
-        resp = session.get(url, **kwargs)
-        if not _looks_blocked(resp):
+        try:
+            resp = session.get(url, **kwargs)
+            last_exc = None
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+            resp = None
+        if resp is not None and not _looks_blocked(resp):
             return resp
         if attempt < RETRY_ATTEMPTS - 1:
             time.sleep(RETRY_BASE_DELAY_SECONDS * (2**attempt))
+    if resp is None:
+        raise last_exc
     return resp
 
 

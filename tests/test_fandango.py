@@ -1,6 +1,8 @@
 import json
 from datetime import date, timedelta
 
+import requests
+
 import fandango
 
 from conftest import FakeSession, fake_html_response, make_fandango_candidate
@@ -44,6 +46,39 @@ def test_get_with_retry_stops_as_soon_as_a_clean_response_arrives(monkeypatch):
     resp = fandango._get_with_retry(session, "https://example.test/x")
     assert resp.text == '{"ok": true}'
     assert len(session.calls) == 2  # didn't burn the 3rd retry once it succeeded
+
+
+def test_get_with_retry_retries_a_connection_exception(monkeypatch):
+    """Regression test for a real gap: session.get() itself raising (a plain
+    timeout or connection error, not a "blocked-looking" 200) used to skip
+    the retry loop entirely and fail on the very first attempt."""
+    monkeypatch.setattr(fandango.time, "sleep", lambda s: None)
+    calls = []
+
+    def router(url, params):
+        calls.append(1)
+        if len(calls) == 1:
+            raise requests.exceptions.ConnectionError("refused")
+        return _FakeResp('{"ok": true}')
+
+    session = FakeSession(router)
+    resp = fandango._get_with_retry(session, "https://example.test/x")
+    assert resp.text == '{"ok": true}'
+    assert len(calls) == 2
+
+
+def test_get_with_retry_raises_when_every_attempt_fails_to_connect(monkeypatch):
+    monkeypatch.setattr(fandango.time, "sleep", lambda s: None)
+
+    def router(url, params):
+        raise requests.exceptions.ReadTimeout("timed out")
+
+    session = FakeSession(router)
+    try:
+        fandango._get_with_retry(session, "https://example.test/x")
+        assert False, "expected ReadTimeout to propagate"
+    except requests.exceptions.ReadTimeout:
+        pass
 
 
 def test_search_movie_retries_a_blocked_response(monkeypatch):
