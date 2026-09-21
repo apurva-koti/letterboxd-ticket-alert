@@ -26,15 +26,22 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("letterboxd-ticket-alert")
 
 
-def _is_transient_network_error(exc):
-    """True for a plain connectivity hiccup (a request that timed out, or
-    couldn't connect at all) talking to Letterboxd/Fandango/Box Office Mojo -
-    confirmed repeatedly in production to self-heal within one or two 15-min
-    cron cycles with no intervention needed, so not worth an email. Deliberately
-    narrower than "any requests exception": an HTTPError (a real 4xx/5xx, e.g.
-    a site structure change or a hard block) or anything else still emails -
-    those aren't "the network hiccuped," they're worth a human actually looking."""
-    return isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError))
+def _is_transient_failure(exc):
+    """True for a failure talking to Letterboxd/Fandango/Box Office Mojo that's
+    confirmed (repeatedly, in production) to self-heal within one or two
+    15-min cron cycles with no intervention needed, so not worth an email:
+    a plain connectivity hiccup (timed out, or couldn't connect at all), or a
+    5xx from the site's own server (its problem, not ours - e.g. a real
+    Letterboxd 500 caught in production right after this function was first
+    added, which the original version wrongly still emailed on). A 4xx
+    (e.g. a 403 block or a 404 from a URL format that changed) is NOT treated
+    as transient - that usually means something on our end needs fixing, so
+    it still emails, same as any other, non-request exception."""
+    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None:
+        return 500 <= exc.response.status_code < 600
+    return False
 
 app = modal.App("letterboxd-ticket-alert")
 
@@ -110,13 +117,13 @@ def run_scheduler():
             except Exception:
                 logger.exception(f"Email failed for {notification.film.title} - will retry next run")
     except Exception as e:
-        if _is_transient_network_error(e):
+        if _is_transient_failure(e):
             # Logged (visible in the Modal dashboard) and still re-raised so
             # Modal marks the invocation as errored there too - just not
             # emailed, since this class of failure isn't actionable and
             # clears up on its own well before a human could do anything
             # about it anyway.
-            logger.warning(f"Run failed on a transient network error, not emailing: {e!r}")
+            logger.warning(f"Run failed on a transient error, not emailing: {e!r}")
             raise
         logger.exception("Run failed")
         # A crashed run wouldn't otherwise be visible anywhere but the Modal
