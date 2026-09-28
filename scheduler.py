@@ -209,7 +209,30 @@ def run(username, zip_code, hype_list_url=None, db_path=state.DB_PATH):
             try:
                 match = ticket_checker.get_or_match(conn, session, film, is_hype=is_hype)
                 if not match or not match.fandango_id:
-                    continue  # still unmatched (or not due for a match retry); nothing to check yet
+                    # Still unmatched. Without a ticket_status row, is_due()
+                    # treats this film as permanently due - forever, every
+                    # run - since that row is only ever written by
+                    # check_film, which never runs for an unmatched film.
+                    # Real production incident this caused: once exactly
+                    # MAX_PROCESSED_PER_RUN films were simultaneously stuck
+                    # in this state (some legacy titles just have no
+                    # Fandango listing, ever), they alone filled every cap
+                    # slot on every single run, permanently starving every
+                    # film added to the watchlist afterward from ever
+                    # getting even a first match attempt - not because of
+                    # anything about those films, purely fixed row order
+                    # plus this missing reschedule. Giving it the same
+                    # TIER_UNKNOWN cadence a matched-but-dateless film
+                    # already gets closes that: not for Hype, which is
+                    # deliberately retried every run regardless (get_or_match
+                    # already bypasses MATCH_RETRY_INTERVAL for it) - writing
+                    # a real next_check_at here would fight that.
+                    if not is_hype:
+                        next_at = next_check_time(TIER_UNKNOWN, now).isoformat()
+                        state.save_ticket_status(
+                            conn, film.slug, "none", None, alerted=False, tier=TIER_UNKNOWN, next_check_at=next_at
+                        )
+                    continue
 
                 release_date = date.fromisoformat(match.release_date) if match.release_date else None
                 tier = compute_tier(release_date, today=now.date(), is_hype=is_hype)

@@ -69,9 +69,28 @@ def test_is_due_true_after_scheduled_time():
 # ---- full run() integration, with the network layer mocked ----
 
 REAL_MATCHES = {
-    "coyote-vs-acme": {"fandango_id": "246329", "slug": "coyote-vs-acme-246329", "release_date": date(2026, 8, 28)},
-    "your-mother-x3": {"fandango_id": "246407", "slug": "your-mother-x3", "release_date": date(2026, 9, 25)},
-    "digger-2026": {"fandango_id": "245150", "slug": "digger-2026-245150", "release_date": date(2026, 10, 2)},
+    # scheduler.run() always uses the real wall-clock date internally (no
+    # `today` override exists there), so these are relative to date.today()
+    # rather than fixed absolute dates - a hardcoded date silently drifts out
+    # of its intended tier boundary as real time passes (this bit a prior
+    # version of this fixture: "your-mother-x3"'s release date was 6 days out
+    # when written, but a plain 8/28-style constant becomes "in the past" a
+    # few weeks later, flipping its expected tier).
+    "coyote-vs-acme": {
+        "fandango_id": "246329",
+        "slug": "coyote-vs-acme-246329",
+        "release_date": date.today() - timedelta(days=22),  # well past RECENT_WINDOW_DAYS - stays RETIRED
+    },
+    "your-mother-x3": {
+        "fandango_id": "246407",
+        "slug": "your-mother-x3",
+        "release_date": date.today() + timedelta(days=6),  # within HOT_WINDOW_DAYS - stays HOT
+    },
+    "digger-2026": {
+        "fandango_id": "245150",
+        "slug": "digger-2026-245150",
+        "release_date": date.today() + timedelta(days=13),  # within HOT_WINDOW_DAYS - stays HOT
+    },
 }
 REAL_STATUSES = {
     "coyote-vs-acme": TicketStatusResult(date="2026-09-19", status="on_sale", on_sale_theaters=["AMC 34th"], showtimes_only_theaters=[]),
@@ -160,6 +179,44 @@ def test_run_caps_films_processed_per_run(monkeypatch, tmp_path):
     scheduler.run("fake_user", "94158", db_path=db_path)
 
     assert len(attempted) == scheduler.MAX_PROCESSED_PER_RUN  # not all of the backlog in one run
+
+
+def test_run_unmatched_films_do_not_permanently_starve_the_rest_of_the_backlog(monkeypatch, tmp_path):
+    """Regression test for a real production incident: an unmatched film gets
+    no ticket_status row (only check_film writes one, and that never runs for
+    an unmatched film), so is_due() treated it as due forever. Once exactly
+    MAX_PROCESSED_PER_RUN films were permanently stuck unmatched (some titles
+    genuinely have no Fandango listing), they alone filled every cap slot on
+    every single run, forever - meaning every film added to the watchlist
+    after that point never got so much as a first match attempt, no matter
+    how many runs passed. A film that comes back unmatched must get pushed
+    to a real next_check_at so its cap slot frees up for something else."""
+    total = scheduler.MAX_PROCESSED_PER_RUN + 5
+    films = [make_film(title=f"Film {i}", year=2020, slug=f"film-{i}") for i in range(total)]
+    monkeypatch.setattr(letterboxd, "get_watchlist", lambda username, **kw: films)
+    monkeypatch.setattr(fandango, "new_session", lambda: None)
+    monkeypatch.setattr(scheduler.time, "sleep", lambda s: None)
+    monkeypatch.setattr(
+        ticket_checker, "get_or_match", lambda conn, session, film, is_hype=False: make_match(fandango_id=None)
+    )
+
+    db_path = str(tmp_path / "test.db")
+    scheduler.run("fake_user", "94158", db_path=db_path)  # run 1: first MAX_PROCESSED_PER_RUN films attempted
+
+    attempted_run2 = []
+
+    def counting_get_or_match(conn, session, film, is_hype=False):
+        attempted_run2.append(film.slug)
+        return make_match(fandango_id=None)
+
+    monkeypatch.setattr(ticket_checker, "get_or_match", counting_get_or_match)
+    scheduler.run("fake_user", "94158", db_path=db_path)  # run 2
+
+    # Without the fix, run 2 would re-attempt the exact same first 20 films
+    # again (permanently due, never rescheduled) - the last 5 (which lost the
+    # cap race on run 1) would never appear in any run, ever.
+    assert "film-20" in attempted_run2
+    assert "film-24" in attempted_run2
 
 
 def test_run_cap_does_not_apply_to_hype_films(monkeypatch, tmp_path):
