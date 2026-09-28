@@ -17,11 +17,13 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+from domain import PendingNotification
+
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 
 
-def send_email(subject, plain_body, html_body=None):
+def send_email(subject: str, plain_body: str, html_body: str | None = None) -> None:
     address = os.environ["GMAIL_ADDRESS"]
     app_password = os.environ["GMAIL_APP_PASSWORD"]
 
@@ -43,7 +45,7 @@ def send_email(subject, plain_body, html_body=None):
         server.sendmail(address, [address], message.as_string())
 
 
-def format_alert(notification):
+def format_alert(notification: PendingNotification) -> tuple[str, str, str]:
     """Returns (subject, plain_body, html_body). Subject is deliberately
     loud/distinctive - the whole reason for wanting alerts outside Fandango's
     own email notifications, earlier in this project, was that email is easy
@@ -59,7 +61,7 @@ def format_alert(notification):
     return subject, plain_body, _render_html(notification)
 
 
-def _render_html(notification):
+def _render_html(notification: PendingNotification) -> str:
     """Table-based layout (not flexbox/grid) for the poster+content split -
     the reliably email-client-safe way to do multi-column layout, unlike
     modern CSS which Gmail and others support unevenly."""

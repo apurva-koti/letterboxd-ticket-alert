@@ -15,7 +15,7 @@ from pathlib import Path
 _LOCAL_CONFIG_PATH = Path(__file__).parent / "local_config.json"
 
 
-def _load_local_config():
+def _load_local_config() -> dict[str, str]:
     if _LOCAL_CONFIG_PATH.exists():
         return json.loads(_LOCAL_CONFIG_PATH.read_text())
     return {}
@@ -24,7 +24,7 @@ def _load_local_config():
 _file_config = _load_local_config()
 
 
-def _get(key):
+def _get(key: str) -> str | None:
     return os.environ.get(key) or _file_config.get(key)
 
 

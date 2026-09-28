@@ -4,7 +4,7 @@ from email import policy
 import email_alert
 
 from conftest import make_film
-from models import PendingNotification
+from domain import PendingNotification
 
 
 def _decoded_parts(message_string):
