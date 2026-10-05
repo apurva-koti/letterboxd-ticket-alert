@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from datetime import date, timedelta
+from datetime import date
 
 import requests
 from bs4 import BeautifulSoup
@@ -34,11 +34,6 @@ RELEASE_DATE_RE = re.compile(r'"releaseDateQueryParam":"(\d{4}-\d{2}-\d{2})"')
 BLOCK_PAGE_MARKER = "A Message To Our Fans"
 RETRY_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECONDS = 1.5
-
-NEAR_TERM_DAYS_AHEAD = 14
-RELEASE_WINDOW_BEFORE_DAYS = 7
-RELEASE_WINDOW_AFTER_DAYS = 7
-
 
 def _looks_blocked(resp: requests.Response) -> bool:
     return BLOCK_PAGE_MARKER in resp.text or not resp.text.strip()
@@ -116,23 +111,15 @@ class FandangoClient:
         match = RELEASE_DATE_RE.search(resp.text)
         return date.fromisoformat(match.group(1)) if match else None
 
-    def check_showtimes(
-        self, fandango_id: str, slug: str, zip_code: str, release_date: date | None = None
-    ) -> ShowtimeCheck | None:
-        """Scans the near-term window, plus a window around release_date if
-        that's further out - a hyped release's opening-weekend showtimes can
-        go live months ahead while the daily near-term listings stay empty
-        (confirmed on Dune: Part Three)."""
+    def check_showtimes(self, fandango_id: str, slug: str, zip_code: str) -> ShowtimeCheck | None:
+        """Looks up which dates actually have showtimes via Fandango's own
+        movieCalendar endpoint (what the real date-picker on the movie page
+        itself uses), then checks just those dates for ticket-type detail -
+        no more guessing a date window and risking a booking outside it
+        (confirmed missed in production: a one-off limited engagement three
+        weeks past a film's main release)."""
         referer = f"{BASE_URL}/{slug}/movie-overview"
-        today = date.today()
-        dates_to_check = [today + timedelta(days=offset) for offset in range(NEAR_TERM_DAYS_AHEAD)]
-
-        if release_date and (release_date - today).days >= NEAR_TERM_DAYS_AHEAD:
-            window_start = release_date - timedelta(days=RELEASE_WINDOW_BEFORE_DAYS)
-            span = RELEASE_WINDOW_BEFORE_DAYS + RELEASE_WINDOW_AFTER_DAYS + 1
-            dates_to_check += [window_start + timedelta(days=offset) for offset in range(span)]
-
-        for check_date in dates_to_check:
+        for check_date in self._movie_calendar(slug, zip_code):
             data = self._showtime_grouping(fandango_id, zip_code, check_date, referer)
             if not data:
                 continue
@@ -160,6 +147,20 @@ class FandangoClient:
                     showtimes_only_theaters=sorted(showtimes_only),
                 )
         return None
+
+    def _movie_calendar(self, slug: str, zip_code: str) -> list[date]:
+        resp = self._get(
+            f"{BASE_URL}/napi/movieCalendar/{slug}",
+            params={"postalCode": zip_code, "zip": zip_code},
+            headers={"Accept": "application/json", "Referer": f"{BASE_URL}/{slug}/movie-overview"},
+        )
+        resp.raise_for_status()
+        try:
+            data = resp.json()
+        except ValueError:
+            return []
+        dates = (data.get("movieCalendar") or {}).get("showtimeDates") or []
+        return [date.fromisoformat(d) for d in dates]
 
     def _showtime_grouping(self, fandango_id: str, zip_code: str, check_date: date, referer: str) -> dict | None:
         url = f"{BASE_URL}/napi/theaterShowtimeGroupings/{fandango_id}/{check_date.isoformat()}"

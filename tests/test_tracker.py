@@ -52,7 +52,7 @@ class FakeFandango:
         self.showtimes = showtimes or {}
         self.calls = []
 
-    def check_showtimes(self, fandango_id, slug, zip_code, release_date=None):
+    def check_showtimes(self, fandango_id, slug, zip_code):
         self.calls.append(fandango_id)
         return self.showtimes.get(fandango_id)
 

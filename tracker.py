@@ -200,7 +200,7 @@ class Tracker:
         now: datetime,
         result: RunResult,
     ) -> None:
-        check = fandango.check_showtimes(listing.fandango_id, listing.slug, zip_code, anchor)
+        check = fandango.check_showtimes(listing.fandango_id, listing.slug, zip_code)
         new_status = check.status if check else TicketStatus.NONE
         should_alert = new_status == TicketStatus.ON_SALE and previous_status != TicketStatus.ON_SALE
 
