@@ -45,7 +45,6 @@ class FandangoListing:
     title: str
     year: int | None
     url: str
-    release_date: date | None = None
     director: str | None = None
 
 
@@ -64,6 +63,7 @@ class TrackedFilm:
 
     film: Film
     anchor_date: date | None
+    director: str | None
     fandango: FandangoListing | None
     poster_url: str | None
     excluded_reason: str | None

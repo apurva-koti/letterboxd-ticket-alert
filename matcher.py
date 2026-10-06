@@ -1,92 +1,48 @@
-"""Picks which Fandango listing corresponds to a Letterboxd-confirmed release.
+"""Finds every Fandango listing that could plausibly be a given film.
 
-Ranked by how close a candidate's own release date is to the anchor, not by
-title score - a re-release is often worded very differently from the
-original ("Moonlight 10th Anniversary Remastered" vs "Moonlight"), so title
-similarity is only a low floor to keep unrelated search results out, and
-director is a required confirming check on whichever candidate wins.
+Fandango's own "release date" field is not used at all - verified
+unreliable in production: a listing can be reused for a re-release without
+that field ever being updated (American Psycho's listing still shows its
+2000 release for a real 2026 re-release), while a different re-release
+(Moonlight's 10th anniversary) gets an entirely separate listing instead.
+Neither case has one "best" candidate to pick in advance by any property of
+the listing itself - every surviving candidate has to actually be checked
+for live showtimes by the caller.
 """
 
 from __future__ import annotations
 
 import re
 import unicodedata
-from datetime import date
 from difflib import SequenceMatcher
 
 from domain import FandangoListing
 from fandango_client import FandangoClient
 
 MIN_TITLE_SCORE = 0.3
-MAX_DATE_DISTANCE_DAYS = 45
 TITLE_ONLY_MATCH_THRESHOLD = 0.85
-AMBIGUITY_GAP = 0.05
 DIRECTOR_MATCH_THRESHOLD = 0.6
 
 
-def find_anchored_match(client: FandangoClient, title: str, anchor: date, director: str | None) -> FandangoListing | None:
-    candidates = [c for c in client.search(title) if _similarity(title, c.title) >= MIN_TITLE_SCORE]
-    if not candidates:
-        return None
-
-    for c in candidates:
-        c.release_date = client.fetch_release_date(c.slug)
-
-    best = min(candidates, key=lambda c: _date_distance(c.release_date, anchor))
-    if best.release_date is None or _date_distance(best.release_date, anchor) > MAX_DATE_DISTANCE_DAYS:
-        return None
-
-    if director:
-        best.director = client.fetch_director(best.slug)
-        if best.director and _similarity(director, best.director) < DIRECTOR_MATCH_THRESHOLD:
-            return None
-
-    return best
-
-
-def find_match_by_title(client: FandangoClient, title: str, director: str | None) -> FandangoListing | None:
-    """Used only when there's no Letterboxd anchor yet to rank by (a Hype
-    film Fandango may have catalogued before Letterboxd confirms a date) -
-    a stricter title floor than find_anchored_match, since there's no date
-    signal to fall back on."""
-    scored = [(_similarity(title, c.title), c) for c in client.search(title)]
-    if not scored:
-        return None
-
-    scored.sort(key=lambda pair: pair[0], reverse=True)
-    top_score, top = scored[0]
-    if top_score < TITLE_ONLY_MATCH_THRESHOLD:
-        return None
-
-    tied = [c for score, c in scored if top_score - score <= AMBIGUITY_GAP]
-    if len(tied) > 1:
-        return _resolve_tie_by_director(client, tied, director)
-
-    if director:
-        top.director = client.fetch_director(top.slug)
-        if top.director and _similarity(director, top.director) < DIRECTOR_MATCH_THRESHOLD:
-            return None
-
-    return top
-
-
-def _resolve_tie_by_director(
-    client: FandangoClient, tied: list[FandangoListing], director: str | None
-) -> FandangoListing | None:
+def find_candidates(client: FandangoClient, title: str, director: str | None) -> list[FandangoListing]:
+    """Title alone is a weak signal, so with a director to check against,
+    the title floor stays low and director does the real filtering - any
+    candidate whose director doesn't actively contradict is kept, since a
+    missing director (on either side) is a data gap, not a contradiction.
+    Without a director to check at all, title is the only signal left, so
+    it has to be held to a much stricter bar instead."""
+    floor = MIN_TITLE_SCORE if director else TITLE_ONLY_MATCH_THRESHOLD
+    plausible = [c for c in client.search(title) if _similarity(title, c.title) >= floor]
     if not director:
-        return None
-    matches = []
-    for c in tied:
+        return plausible
+
+    survivors = []
+    for c in plausible:
         c.director = client.fetch_director(c.slug)
-        if c.director and _similarity(director, c.director) >= DIRECTOR_MATCH_THRESHOLD:
-            matches.append(c)
-    return matches[0] if len(matches) == 1 else None
-
-
-def _date_distance(candidate_date: date | None, anchor: date) -> float:
-    if candidate_date is None:
-        return float("inf")
-    return abs((candidate_date - anchor).days)
+        if c.director and _similarity(director, c.director) < DIRECTOR_MATCH_THRESHOLD:
+            continue
+        survivors.append(c)
+    return survivors
 
 
 def _similarity(a: str, b: str) -> float:

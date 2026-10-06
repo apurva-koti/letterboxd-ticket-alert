@@ -1,8 +1,10 @@
-"""Fandango I/O: search, director/release-date lookups, live showtime checks.
+"""Fandango I/O: search, director lookups, live showtime checks.
 
-No public API, so this scrapes fandango.com directly. The napi showtime
-endpoint 403s without cookies from a prior page visit plus a matching
-Referer - no login needed, just a same-session-looking request.
+No public API, so this scrapes fandango.com directly. The napi endpoints
+403 without cookies from a prior page visit plus a matching Referer - no
+login needed, just a same-session-looking request. Fandango's own
+"release date" field is deliberately never used here - verified unreliable
+(see matcher.py's docstring).
 """
 
 from __future__ import annotations
@@ -27,7 +29,6 @@ HEADERS = {
 
 TITLE_YEAR_RE = re.compile(r"^(.*)\s\((\d{4})\)$")
 DIRECTOR_RE = re.compile(r'"director":\[\{"@type":"Person","name":"((?:[^"\\]|\\.)*)"')
-RELEASE_DATE_RE = re.compile(r'"releaseDateQueryParam":"(\d{4}-\d{2}-\d{2})"')
 
 # Akamai's bot-management can intermittently serve this block page, or a
 # plain empty body, instead of a real response - confirmed transient.
@@ -104,12 +105,6 @@ class FandangoClient:
             return json.loads(f'"{match.group(1)}"')
         except json.JSONDecodeError:
             return match.group(1)
-
-    def fetch_release_date(self, slug: str) -> date | None:
-        resp = self._get(f"{BASE_URL}/{slug}/movie-overview")
-        resp.raise_for_status()
-        match = RELEASE_DATE_RE.search(resp.text)
-        return date.fromisoformat(match.group(1)) if match else None
 
     def check_showtimes(self, fandango_id: str, slug: str, zip_code: str) -> ShowtimeCheck | None:
         """Looks up which dates actually have showtimes via Fandango's own

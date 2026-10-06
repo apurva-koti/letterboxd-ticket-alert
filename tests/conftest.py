@@ -29,7 +29,6 @@ def make_listing(**overrides):
         "title": "Digger",
         "year": 2026,
         "url": "https://www.fandango.com/digger-2026-245150/movie-overview",
-        "release_date": None,
         "director": None,
     }
     return FandangoListing(**{**defaults, **overrides})

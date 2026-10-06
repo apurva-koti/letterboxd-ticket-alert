@@ -57,17 +57,6 @@ def test_save_match_round_trips_fandango_listing():
     assert tracked.poster_url == "http://x/p.jpg"
 
 
-def test_clear_fandango_binding_keeps_anchor_date():
-    r = repo()
-    r.sync_watchlist([make_film(slug="a")])
-    r.save_match("a", make_listing(), date(1986, 5, 16))
-
-    r.clear_fandango_binding("a")
-    tracked = r.get("a")
-    assert tracked.fandango is None
-    assert tracked.anchor_date == date(1986, 5, 16)
-
-
 def test_save_status_clears_notified_at_when_status_leaves_on_sale():
     r = repo()
     r.sync_watchlist([make_film(slug="a")])
@@ -89,22 +78,6 @@ def test_save_status_preserves_alerted_at_across_unrelated_calls():
 
     r.save_status("a", TicketStatus.ON_SALE, date(2026, 1, 2), ["X"], [], False, Tier.HOT, now)
     assert r.get("a").alerted_at == first_alerted_at
-
-
-def test_reset_for_retirement_clears_status_and_alerts():
-    r = repo()
-    r.sync_watchlist([make_film(slug="a")])
-    now = datetime.now(timezone.utc)
-    r.save_status("a", TicketStatus.ON_SALE, date(2026, 1, 1), ["X"], [], True, Tier.HOT, now)
-    r.mark_notified("a")
-
-    r.reset_for_retirement("a", now)
-    tracked = r.get("a")
-    assert tracked.status == TicketStatus.NONE
-    assert tracked.on_sale_theaters == []
-    assert tracked.alerted_at is None
-    assert tracked.notified_at is None
-    assert tracked.tier == Tier.RETIRED
 
 
 def test_get_unnotified_only_returns_on_sale_without_notification():

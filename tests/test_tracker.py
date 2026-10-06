@@ -77,7 +77,7 @@ def test_run_matches_and_checks_a_new_upcoming_film(monkeypatch, repo):
     lb = FakeLetterboxd(watchlist=[film], releases={"digger-2026": release})
 
     listing = make_listing(fandango_id="245150")
-    monkeypatch.setattr(matcher, "find_anchored_match", lambda *a, **k: listing)
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [listing])
     fandango = FakeFandango(showtimes={"245150": make_showtime_check(status=TicketStatus.ON_SALE)})
     _install_fandango(monkeypatch, fandango)
 
@@ -95,7 +95,7 @@ def test_alert_fires_only_on_transition_into_on_sale(monkeypatch, repo):
     release = LetterboxdRelease(director=None, genres=[], poster_url=None, us_dates=[date(2026, 10, 2)])
     lb = FakeLetterboxd(watchlist=[film], releases={"digger-2026": release})
     listing = make_listing(fandango_id="245150")
-    monkeypatch.setattr(matcher, "find_anchored_match", lambda *a, **k: listing)
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [listing])
 
     fandango = FakeFandango(showtimes={"245150": make_showtime_check(status=TicketStatus.ON_SALE)})
     _install_fandango(monkeypatch, fandango)
@@ -114,7 +114,12 @@ def test_documentary_is_excluded_and_never_matched(monkeypatch, repo):
     release = LetterboxdRelease(director="A Director", genres=["documentary"], poster_url=None, us_dates=[date(2026, 1, 1)])
     lb = FakeLetterboxd(watchlist=[film], releases={"nuisance-bear": release})
     called = []
-    monkeypatch.setattr(matcher, "find_anchored_match", lambda *a, **k: called.append(1))
+
+    def fake_find_candidates(*a, **k):
+        called.append(1)
+        return []
+
+    monkeypatch.setattr(matcher, "find_candidates", fake_find_candidates)
     _install_fandango(monkeypatch, FakeFandango())
 
     Tracker(repo, lb).run("user", "94158")
@@ -130,7 +135,7 @@ def test_unmatched_film_is_rescheduled_not_starved(monkeypatch, repo):
     film = make_film(slug="obscure-film")
     release = LetterboxdRelease(director=None, genres=[], poster_url=None, us_dates=[date.today() + timedelta(days=30)])
     lb = FakeLetterboxd(watchlist=[film], releases={"obscure-film": release})
-    monkeypatch.setattr(matcher, "find_anchored_match", lambda *a, **k: None)
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [])
     _install_fandango(monkeypatch, FakeFandango())
 
     Tracker(repo, lb).run("user", "94158")
@@ -147,7 +152,9 @@ def test_retired_film_drops_fandango_binding_and_resets_status(monkeypatch, repo
     repo.save_match("old-film", make_listing(), date.today() - timedelta(days=100))
     repo.save_status("old-film", TicketStatus.NONE, None, [], [], False, Tier.RECENT, datetime.now(timezone.utc) - timedelta(hours=1))
 
-    lb = FakeLetterboxd(watchlist=[film])
+    release = LetterboxdRelease(director=None, genres=[], poster_url=None, us_dates=[date.today() - timedelta(days=100)])
+    lb = FakeLetterboxd(watchlist=[film], releases={"old-film": release})
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [])
     _install_fandango(monkeypatch, FakeFandango())
     Tracker(repo, lb).run("user", "94158")
 
@@ -162,20 +169,17 @@ def test_retired_film_picks_up_a_new_anchor_and_rematches(monkeypatch, repo):
     resume normal polling."""
     film = make_film(slug="moonlight-2016", title="Moonlight")
     repo.sync_watchlist([film])
-    repo.reset_for_retirement("moonlight-2016", datetime.now(timezone.utc) - timedelta(hours=1))
-    conn = repo.conn
-    conn.execute(
-        "INSERT INTO fandango_matches (letterboxd_slug, release_date, release_date_source, checked_at) VALUES (?, ?, 'letterboxd', ?)",
-        ("moonlight-2016", "2016-10-21", datetime.now(timezone.utc).isoformat()),
+    repo.save_match("moonlight-2016", None, date(2016, 10, 21))
+    repo.save_status(
+        "moonlight-2016", TicketStatus.NONE, None, [], [], False, Tier.RETIRED, datetime.now(timezone.utc) - timedelta(hours=1)
     )
-    conn.commit()
 
     new_anchor = date.today() + timedelta(days=10)
     release = LetterboxdRelease(director="Barry Jenkins", genres=[], poster_url=None, us_dates=[date(2016, 10, 21), new_anchor])
     lb = FakeLetterboxd(watchlist=[film], releases={"moonlight-2016": release})
 
     listing = make_listing(fandango_id="999", slug="moonlight-anniversary")
-    monkeypatch.setattr(matcher, "find_anchored_match", lambda *a, **k: listing)
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [listing])
     fandango = FakeFandango(showtimes={"999": make_showtime_check(status=TicketStatus.ON_SALE)})
     _install_fandango(monkeypatch, fandango)
 
@@ -189,8 +193,7 @@ def test_retired_film_picks_up_a_new_anchor_and_rematches(monkeypatch, repo):
 def test_run_caps_films_processed_per_run(monkeypatch, repo):
     films = [make_film(slug=f"film-{i}", title=f"Film {i}") for i in range(tracker_module.MAX_PROCESSED_PER_RUN + 5)]
     lb = FakeLetterboxd(watchlist=films)
-    monkeypatch.setattr(matcher, "find_anchored_match", lambda *a, **k: None)
-    monkeypatch.setattr(matcher, "find_match_by_title", lambda *a, **k: None)
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [])
     _install_fandango(monkeypatch, FakeFandango())
 
     Tracker(repo, lb).run("user", "94158")
@@ -203,9 +206,8 @@ def test_hype_film_bypasses_the_cap(monkeypatch, repo):
     films = [make_film(slug=f"film-{i}", title=f"Film {i}") for i in range(tracker_module.MAX_PROCESSED_PER_RUN)]
     hype_film = make_film(slug="dune-part-three", title="Dune: Part Three")
     lb = FakeLetterboxd(watchlist=films, hype=[hype_film])
-    monkeypatch.setattr(matcher, "find_anchored_match", lambda *a, **k: None)
-    monkeypatch.setattr(matcher, "find_match_by_title", lambda *a, **k: make_listing(fandango_id="1"))
-    _install_fandango(monkeypatch, FakeFandango(showtimes={"1": None}))
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [make_listing(fandango_id="1")])
+    _install_fandango(monkeypatch, FakeFandango(showtimes={"1": make_showtime_check()}))
 
     Tracker(repo, lb).run("user", "94158", hype_list_url="https://letterboxd.com/x/list/hype/")
 
@@ -245,8 +247,8 @@ def test_one_films_failure_does_not_block_the_rest(monkeypatch, repo):
         return release
 
     lb.fetch_release = flaky_fetch_release
-    monkeypatch.setattr(matcher, "find_anchored_match", lambda *a, **k: make_listing(fandango_id="1"))
-    fandango = FakeFandango(showtimes={"1": make_showtime_check(status=TicketStatus.NONE)})
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [make_listing(fandango_id="1")])
+    fandango = FakeFandango(showtimes={"1": make_showtime_check(status=TicketStatus.NONE, on_sale_theaters=[], showtimes_only_theaters=[])})
     _install_fandango(monkeypatch, fandango)
 
     result = Tracker(repo, lb).run("user", "94158")

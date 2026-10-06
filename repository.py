@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS fandango_matches (
     matched_year INTEGER,
     release_date TEXT,
     release_date_source TEXT,
+    director TEXT,
     excluded_reason TEXT,
     checked_at TEXT NOT NULL,
     poster_url TEXT
@@ -46,6 +47,12 @@ CREATE TABLE IF NOT EXISTS ticket_status (
     notified_at TEXT
 );
 """
+
+# CREATE TABLE IF NOT EXISTS above only applies to brand-new DBs - an
+# existing one needs columns added after the fact explicitly.
+MIGRATIONS = [
+    "ALTER TABLE fandango_matches ADD COLUMN director TEXT",
+]
 
 
 def _now() -> str:
@@ -69,6 +76,12 @@ class FilmRepository:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         conn.executescript(SCHEMA)
+        for migration in MIGRATIONS:
+            try:
+                conn.execute(migration)
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise
         conn.commit()
         return cls(conn)
 
@@ -120,11 +133,13 @@ class FilmRepository:
 
         fandango = None
         anchor_date = None
+        director = None
         excluded_reason = None
         poster_url = None
         checked_at = None
         if match_row:
             anchor_date = _parse_date(match_row["release_date"])
+            director = match_row["director"]
             excluded_reason = match_row["excluded_reason"]
             poster_url = match_row["poster_url"]
             checked_at = _parse_dt(match_row["checked_at"])
@@ -135,7 +150,6 @@ class FilmRepository:
                     title=match_row["matched_title"],
                     year=match_row["matched_year"],
                     url=f"https://www.fandango.com/{match_row['fandango_slug']}/movie-overview",
-                    release_date=anchor_date,
                 )
 
         status = TicketStatus.NONE
@@ -159,6 +173,7 @@ class FilmRepository:
         return TrackedFilm(
             film=film,
             anchor_date=anchor_date,
+            director=director,
             fandango=fandango,
             poster_url=poster_url,
             excluded_reason=excluded_reason,
@@ -177,6 +192,7 @@ class FilmRepository:
         slug: str,
         fandango: FandangoListing | None,
         anchor_date: date | None,
+        director: str | None = None,
         excluded_reason: str | None = None,
         poster_url: str | None = None,
     ) -> None:
@@ -184,14 +200,14 @@ class FilmRepository:
             """
             INSERT INTO fandango_matches
                 (letterboxd_slug, fandango_id, fandango_slug, matched_title, matched_year,
-                 release_date, release_date_source, excluded_reason, poster_url, checked_at)
-            VALUES (:slug, :fid, :fslug, :title, :year, :date, :source, :excluded, :poster, :now)
+                 release_date, release_date_source, director, excluded_reason, poster_url, checked_at)
+            VALUES (:slug, :fid, :fslug, :title, :year, :date, :source, :director, :excluded, :poster, :now)
             ON CONFLICT(letterboxd_slug) DO UPDATE SET
                 fandango_id = excluded.fandango_id, fandango_slug = excluded.fandango_slug,
                 matched_title = excluded.matched_title, matched_year = excluded.matched_year,
                 release_date = excluded.release_date, release_date_source = excluded.release_date_source,
-                excluded_reason = excluded.excluded_reason, poster_url = excluded.poster_url,
-                checked_at = excluded.checked_at
+                director = excluded.director, excluded_reason = excluded.excluded_reason,
+                poster_url = excluded.poster_url, checked_at = excluded.checked_at
             """,
             {
                 "slug": slug,
@@ -201,21 +217,11 @@ class FilmRepository:
                 "year": fandango.year if fandango else None,
                 "date": anchor_date.isoformat() if anchor_date else None,
                 "source": "letterboxd" if anchor_date else None,
+                "director": director,
                 "excluded": excluded_reason,
                 "poster": poster_url,
                 "now": _now(),
             },
-        )
-        self.conn.commit()
-
-    def clear_fandango_binding(self, slug: str) -> None:
-        self.conn.execute(
-            """
-            UPDATE fandango_matches
-            SET fandango_id = NULL, fandango_slug = NULL, matched_title = NULL, matched_year = NULL, checked_at = ?
-            WHERE letterboxd_slug = ?
-            """,
-            (_now(), slug),
         )
         self.conn.commit()
 
@@ -255,22 +261,6 @@ class FilmRepository:
                 "tier": tier.value,
                 "next_check": next_check_at.isoformat(),
             },
-        )
-        self.conn.commit()
-
-    def reset_for_retirement(self, slug: str, next_check_at: datetime) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO ticket_status
-                (letterboxd_slug, status, status_date, on_sale_theaters, showtimes_only_theaters,
-                 updated_at, alerted_at, tier, next_check_at, notified_at)
-            VALUES (:slug, 'none', NULL, NULL, NULL, :now, NULL, :tier, :next_check, NULL)
-            ON CONFLICT(letterboxd_slug) DO UPDATE SET
-                status = 'none', status_date = NULL, on_sale_theaters = NULL, showtimes_only_theaters = NULL,
-                updated_at = excluded.updated_at, alerted_at = NULL, tier = excluded.tier,
-                next_check_at = excluded.next_check_at, notified_at = NULL
-            """,
-            {"slug": slug, "now": _now(), "tier": Tier.RETIRED.value, "next_check": next_check_at.isoformat()},
         )
         self.conn.commit()
 
