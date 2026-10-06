@@ -110,6 +110,7 @@ class Tracker:
         today = now.date()
         anchor = tracked.anchor_date
         director = tracked.director
+        runtime = tracked.runtime
         poster_url = tracked.poster_url
         tier = compute_tier(anchor, today, is_hype)
 
@@ -117,15 +118,17 @@ class Tracker:
             refreshed = self._refresh_from_letterboxd(film, is_hype, now)
             if refreshed is None:
                 return  # excluded as documentary - already saved + logged
-            anchor, director, poster_url, tier = refreshed
+            anchor, director, runtime, poster_url, tier = refreshed
 
-        self._check_fandango(fandango, film, director, poster_url, tracked.status, tier, anchor, today, zip_code, now, result)
+        self._check_fandango(
+            fandango, film, director, runtime, poster_url, tracked.status, tier, anchor, today, zip_code, now, result
+        )
 
     def _refresh_from_letterboxd(
         self, film: Film, is_hype: bool, now: datetime
-    ) -> tuple[date | None, str | None, str | None, Tier] | None:
-        """Returns (anchor, director, poster_url, tier), or None if the film
-        was excluded (saved + logged already)."""
+    ) -> tuple[date | None, str | None, int | None, str | None, Tier] | None:
+        """Returns (anchor, director, runtime, poster_url, tier), or None if
+        the film was excluded (saved + logged already)."""
         today = now.date()
         release = self.letterboxd.fetch_release(film.slug)
 
@@ -136,13 +139,14 @@ class Tracker:
 
         anchor = pick_anchor(release.us_dates, today)
         tier = compute_tier(anchor, today, is_hype)
-        return anchor, release.director, release.poster_url, tier
+        return anchor, release.director, release.runtime, release.poster_url, tier
 
     def _check_fandango(
         self,
         fandango: FandangoClient,
         film: Film,
         director: str | None,
+        runtime: int | None,
         poster_url: str | None,
         previous_status: TicketStatus,
         tier: Tier,
@@ -157,7 +161,7 @@ class Tracker:
         new listing (Moonlight's 10th anniversary) or the original one
         reused without its stored date ever updating (American Psycho) -
         no single "best" candidate covers both, so every one gets checked."""
-        candidates = matcher.find_candidates(fandango, film.title, director)
+        candidates = matcher.find_candidates(fandango, film.title, director, runtime, film.year)
 
         on_sale, showtimes_only, active = set(), set(), None
         for c in candidates:
@@ -177,7 +181,7 @@ class Tracker:
             new_status = TicketStatus.NONE
         should_alert = new_status == TicketStatus.ON_SALE and previous_status != TicketStatus.ON_SALE
 
-        self.repo.save_match(film.slug, active, anchor, director=director, poster_url=poster_url)
+        self.repo.save_match(film.slug, active, anchor, director=director, runtime=runtime, poster_url=poster_url)
         self.repo.save_status(
             film.slug, new_status, today, sorted(on_sale), sorted(showtimes_only), should_alert, tier, next_check_at(tier, now)
         )

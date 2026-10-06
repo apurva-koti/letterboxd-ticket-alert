@@ -1,4 +1,4 @@
-"""Fandango I/O: search, director lookups, live showtime checks.
+"""Fandango I/O: search, director/runtime lookups, live showtime checks.
 
 No public API, so this scrapes fandango.com directly. The napi endpoints
 403 without cookies from a prior page visit plus a matching Referer - no
@@ -28,7 +28,6 @@ HEADERS = {
 }
 
 TITLE_YEAR_RE = re.compile(r"^(.*)\s\((\d{4})\)$")
-DIRECTOR_RE = re.compile(r'"director":\[\{"@type":"Person","name":"((?:[^"\\]|\\.)*)"')
 
 # Akamai's bot-management can intermittently serve this block page, or a
 # plain empty body, instead of a real response - confirmed transient.
@@ -38,6 +37,18 @@ RETRY_BASE_DELAY_SECONDS = 1.5
 
 def _looks_blocked(resp: requests.Response) -> bool:
     return BLOCK_PAGE_MARKER in resp.text or not resp.text.strip()
+
+
+def _extract_movie_json_ld(html: str) -> dict | None:
+    soup = BeautifulSoup(html, "html.parser")
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string)
+        except (TypeError, ValueError):
+            continue
+        if data.get("@type") == "Movie":
+            return data
+    return None
 
 
 class FandangoClient:
@@ -95,16 +106,21 @@ class FandangoClient:
             )
         return listings
 
-    def fetch_director(self, slug: str) -> str | None:
+    def fetch_details(self, slug: str) -> tuple[str | None, int | None, str | None]:
+        """Director, runtime, and synopsis all live in the same
+        movie-overview page's JSON-LD block - one request covers all three
+        signals. A real JSON parse, not a regex: the block also has a
+        same-named nested "description" field inside aggregateRating (what
+        the Audience Score means), which a naive regex grabs by mistake
+        instead of the actual synopsis."""
         resp = self._get(f"{BASE_URL}/{slug}/movie-overview")
         resp.raise_for_status()
-        match = DIRECTOR_RE.search(resp.text)
-        if not match:
-            return None
-        try:
-            return json.loads(f'"{match.group(1)}"')
-        except json.JSONDecodeError:
-            return match.group(1)
+        movie = _extract_movie_json_ld(resp.text)
+        if not movie:
+            return None, None, None
+        directors = movie.get("director") or []
+        director = directors[0].get("name") if directors else None
+        return director, movie.get("duration"), movie.get("description")
 
     def check_showtimes(self, fandango_id: str, slug: str, zip_code: str) -> ShowtimeCheck | None:
         """Looks up which dates actually have showtimes via Fandango's own

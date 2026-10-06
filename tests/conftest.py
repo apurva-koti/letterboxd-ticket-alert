@@ -18,7 +18,7 @@ def make_film(**overrides):
 
 
 def make_release(**overrides):
-    defaults = {"director": None, "genres": [], "poster_url": None, "us_dates": []}
+    defaults = {"director": None, "genres": [], "poster_url": None, "us_dates": [], "runtime": None}
     return LetterboxdRelease(**{**defaults, **overrides})
 
 
@@ -30,6 +30,7 @@ def make_listing(**overrides):
         "year": 2026,
         "url": "https://www.fandango.com/digger-2026-245150/movie-overview",
         "director": None,
+        "runtime": None,
     }
     return FandangoListing(**{**defaults, **overrides})
 

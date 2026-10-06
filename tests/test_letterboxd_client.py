@@ -88,6 +88,12 @@ def test_fetch_release_no_false_positive_documentary(monkeypatch):
     assert release.director == "Alfred Hitchcock"
 
 
+def test_fetch_release_extracts_runtime_in_minutes(monkeypatch):
+    monkeypatch.setattr(lc.requests, "get", lambda url, **kw: fake_html_response("letterboxd_film_digger.html"))
+    release = lc.LetterboxdClient().fetch_release("digger-2026")
+    assert release.runtime == 129  # "PT2H9M"
+
+
 def test_pick_anchor_prefers_earliest_upcoming():
     dates = [date(2026, 11, 20), date(2026, 11, 13)]
     assert lc.pick_anchor(dates, today=date(2026, 1, 1)) == date(2026, 11, 13)

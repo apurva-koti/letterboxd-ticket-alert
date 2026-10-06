@@ -36,6 +36,7 @@ class LetterboxdRelease:
     genres: list[str]
     poster_url: str | None
     us_dates: list[date]
+    runtime: int | None = None
 
 
 @dataclass
@@ -46,6 +47,7 @@ class FandangoListing:
     year: int | None
     url: str
     director: str | None = None
+    runtime: int | None = None
 
 
 @dataclass
@@ -64,6 +66,7 @@ class TrackedFilm:
     film: Film
     anchor_date: date | None
     director: str | None
+    runtime: int | None
     fandango: FandangoListing | None
     poster_url: str | None
     excluded_reason: str | None

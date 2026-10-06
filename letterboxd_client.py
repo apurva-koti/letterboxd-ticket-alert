@@ -27,6 +27,8 @@ NAME_YEAR_RE = re.compile(r"^(.*)\s\((\d{4})\)$")
 DIRECTOR_RE = re.compile(r'"director":\[\{"@type":"Person","name":"((?:[^"\\]|\\.)*)"')
 POSTER_RE = re.compile(r'"image":"((?:[^"\\]|\\.)*)"')
 GENRE_LINK_RE = re.compile(r'href="/films/genre/([a-z-]+)/"')
+DURATION_RE = re.compile(r'"duration":"((?:[^"\\]|\\.)*)"')
+ISO_DURATION_RE = re.compile(r"PT(?:(\d+)H)?(?:(\d+)M)?")
 US_RELEASE_SECTIONS = ("Theatrical", "Theatrical limited")
 
 
@@ -124,8 +126,9 @@ class LetterboxdClient:
         poster_url = _extract_json_field(POSTER_RE, html)
         genres = sorted(set(GENRE_LINK_RE.findall(html)))
         us_dates = _extract_us_dates(soup)
+        runtime = _extract_runtime(html)
 
-        return LetterboxdRelease(director=director, genres=genres, poster_url=poster_url, us_dates=us_dates)
+        return LetterboxdRelease(director=director, genres=genres, poster_url=poster_url, us_dates=us_dates, runtime=runtime)
 
 
 def _extract_json_field(pattern: re.Pattern, html: str) -> str | None:
@@ -136,6 +139,17 @@ def _extract_json_field(pattern: re.Pattern, html: str) -> str | None:
         return json.loads(f'"{match.group(1)}"')
     except json.JSONDecodeError:
         return match.group(1)
+
+
+def _extract_runtime(html: str) -> int | None:
+    match = DURATION_RE.search(html)
+    if not match:
+        return None
+    parsed = ISO_DURATION_RE.fullmatch(match.group(1))
+    if not parsed or not any(parsed.groups()):
+        return None
+    hours, minutes = parsed.groups()
+    return int(hours or 0) * 60 + int(minutes or 0)
 
 
 def _extract_us_dates(soup: BeautifulSoup) -> list[date]:

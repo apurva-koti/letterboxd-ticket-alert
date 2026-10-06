@@ -20,9 +20,22 @@ def test_search_scoped_to_results_not_promo_carousel():
     assert not any(c.title == "Buddy" for c in listings)
 
 
-def test_fetch_director_from_overview_page():
+def test_fetch_details_from_overview_page():
     client = _client_with_stubbed_get(lambda url, **kw: fake_html_response("fandango_overview_vertigo.html"))
-    assert client.fetch_director("vertigo-1958-1951") == "Alfred Hitchcock"
+    director, runtime, synopsis = client.fetch_details("vertigo-1958-1951")
+    assert director == "Alfred Hitchcock"
+    assert runtime == 128
+    assert synopsis and "San Francisco" in synopsis
+
+
+def test_fetch_details_prefers_the_real_synopsis_over_the_rating_blurb():
+    """Regression test: the page's JSON-LD also has a same-named nested
+    "description" field inside aggregateRating (explaining what the
+    Audience Score means) - a naive regex grabbed that one by mistake
+    instead of the real movie synopsis."""
+    client = _client_with_stubbed_get(lambda url, **kw: fake_html_response("fandango_overview_vertigo.html"))
+    _, _, synopsis = client.fetch_details("vertigo-1958-1951")
+    assert "Audience Score" not in synopsis
 
 
 def test_looks_blocked_detects_marker_and_empty_body():

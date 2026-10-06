@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS fandango_matches (
     release_date TEXT,
     release_date_source TEXT,
     director TEXT,
+    runtime INTEGER,
     excluded_reason TEXT,
     checked_at TEXT NOT NULL,
     poster_url TEXT
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS ticket_status (
 # existing one needs columns added after the fact explicitly.
 MIGRATIONS = [
     "ALTER TABLE fandango_matches ADD COLUMN director TEXT",
+    "ALTER TABLE fandango_matches ADD COLUMN runtime INTEGER",
 ]
 
 
@@ -134,12 +136,14 @@ class FilmRepository:
         fandango = None
         anchor_date = None
         director = None
+        runtime = None
         excluded_reason = None
         poster_url = None
         checked_at = None
         if match_row:
             anchor_date = _parse_date(match_row["release_date"])
             director = match_row["director"]
+            runtime = match_row["runtime"]
             excluded_reason = match_row["excluded_reason"]
             poster_url = match_row["poster_url"]
             checked_at = _parse_dt(match_row["checked_at"])
@@ -174,6 +178,7 @@ class FilmRepository:
             film=film,
             anchor_date=anchor_date,
             director=director,
+            runtime=runtime,
             fandango=fandango,
             poster_url=poster_url,
             excluded_reason=excluded_reason,
@@ -193,6 +198,7 @@ class FilmRepository:
         fandango: FandangoListing | None,
         anchor_date: date | None,
         director: str | None = None,
+        runtime: int | None = None,
         excluded_reason: str | None = None,
         poster_url: str | None = None,
     ) -> None:
@@ -200,13 +206,13 @@ class FilmRepository:
             """
             INSERT INTO fandango_matches
                 (letterboxd_slug, fandango_id, fandango_slug, matched_title, matched_year,
-                 release_date, release_date_source, director, excluded_reason, poster_url, checked_at)
-            VALUES (:slug, :fid, :fslug, :title, :year, :date, :source, :director, :excluded, :poster, :now)
+                 release_date, release_date_source, director, runtime, excluded_reason, poster_url, checked_at)
+            VALUES (:slug, :fid, :fslug, :title, :year, :date, :source, :director, :runtime, :excluded, :poster, :now)
             ON CONFLICT(letterboxd_slug) DO UPDATE SET
                 fandango_id = excluded.fandango_id, fandango_slug = excluded.fandango_slug,
                 matched_title = excluded.matched_title, matched_year = excluded.matched_year,
                 release_date = excluded.release_date, release_date_source = excluded.release_date_source,
-                director = excluded.director, excluded_reason = excluded.excluded_reason,
+                director = excluded.director, runtime = excluded.runtime, excluded_reason = excluded.excluded_reason,
                 poster_url = excluded.poster_url, checked_at = excluded.checked_at
             """,
             {
@@ -218,6 +224,7 @@ class FilmRepository:
                 "date": anchor_date.isoformat() if anchor_date else None,
                 "source": "letterboxd" if anchor_date else None,
                 "director": director,
+                "runtime": runtime,
                 "excluded": excluded_reason,
                 "poster": poster_url,
                 "now": _now(),
