@@ -39,10 +39,27 @@ def find_candidates(client: FandangoClient, title: str, director: str | None) ->
     survivors = []
     for c in plausible:
         c.director = client.fetch_director(c.slug)
-        if c.director and _similarity(director, c.director) < DIRECTOR_MATCH_THRESHOLD:
+        if c.director and not _directors_match(director, c.director):
             continue
         survivors.append(c)
     return survivors
+
+
+def _directors_match(a: str, b: str) -> bool:
+    """Surname is the primary signal, not the full name - a shared first
+    name can inflate plain character-sequence similarity enough to clear
+    the threshold on its own (confirmed in production: "Martin Scorsese"
+    vs "Martin Campbell", Casino Royale's director, scored 0.6 - exactly
+    the threshold - from the shared "Martin" alone). But surname alone
+    isn't safe either, since real director families share one (Wes
+    Anderson vs Paul Thomas Anderson) - the first name's initial has to
+    agree too."""
+    tokens_a, tokens_b = _normalize(a).split(), _normalize(b).split()
+    if not tokens_a or not tokens_b:
+        return True
+    if _similarity(tokens_a[-1], tokens_b[-1]) < DIRECTOR_MATCH_THRESHOLD:
+        return False
+    return tokens_a[0][0] == tokens_b[0][0]
 
 
 def _similarity(a: str, b: str) -> float:

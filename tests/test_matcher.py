@@ -55,6 +55,28 @@ def test_find_candidates_declines_when_director_contradicts():
     assert candidates == []
 
 
+def test_find_candidates_rejects_a_shared_first_name_with_different_surname():
+    """Regression test for a real false match: "Casino" (dir. Martin
+    Scorsese) matched to "Casino Royale" (dir. Martin Campbell) - a shared
+    first name alone inflated plain string similarity past the threshold."""
+    listings = [make_listing(fandango_id="1", slug="casino-royale-2006", title="Casino Royale", year=2006)]
+    client = FakeClient(listings, directors={"casino-royale-2006": "Martin Campbell"})
+
+    candidates = matcher.find_candidates(client, "Casino", "Martin Scorsese")
+    assert candidates == []
+
+
+def test_find_candidates_rejects_a_shared_surname_with_different_first_name():
+    """Same family of bug, the other direction: a shared surname alone
+    (two real, distinct directors named Anderson) shouldn't be enough
+    either."""
+    listings = [make_listing(fandango_id="1", slug="phantom-thread-2017", title="Phantom Thread", year=2017)]
+    client = FakeClient(listings, directors={"phantom-thread-2017": "Paul Thomas Anderson"})
+
+    candidates = matcher.find_candidates(client, "Phantom Thread", "Wes Anderson")
+    assert candidates == []
+
+
 def test_find_candidates_keeps_a_missing_director_as_a_data_gap():
     """A listing with no director info at all is a data gap, not a
     contradiction - it survives rather than getting dropped."""
