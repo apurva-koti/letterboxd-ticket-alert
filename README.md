@@ -85,32 +85,19 @@ modal secret list                    # confirms config-ui exists
 
 Comma-separated theater names (matching Fandango's exactly, e.g. "AMC
 Mercado 20, Cinemark Century San Mateo 12") you'd never actually go to. A
-showing that's only at blacklisted theaters is treated as if it were never
-on sale at all - not just "don't email about it" - so a real alert still
-fires the moment tickets reach anywhere else, instead of being suppressed
-forever because the status already flipped once. The run log notes this
-each time it happens: `on sale only at blacklisted theater(s), skipping: ...`.
-
-Saving the list also retroactively cleans up alerts that are now
-worthless: a film stays alerted as long as at least one of the theaters
-that *actually triggered its alert* is still not blacklisted - getting one
-good alert already satisfied it, so a second theater joining later
-(blacklisted or not) doesn't undo that. Only a film whose alerted
-theater(s) are now *all* blacklisted gets cleared, making it eligible to
-alert again once it reaches a real one. The form shows which films, if
-any, got cleared; the same gets logged server-side as
-`Blacklist updated: cleared N now-worthless alert(s): ...`.
+showing only at these theaters won't alert you - the alert still fires
+normally once a real theater has tickets. Updating the list also
+retroactively clears any already-sent alert that turns out to only be
+backed by blacklisted theaters now, so you'll hear about that film again
+once a real theater comes through.
 
 ### Hype
 
-For films whose tickets go on sale with almost no notice - the normal
-tiered schedule (see below) isn't fast enough. Make a Letterboxd list (any
-name) and add films to it:
-
-- Tracked even if not on your watchlist
-- Documentaries not excluded
-- Checked (and re-matched) every single run, even before Letterboxd has a
-  confirmed date
+A Letterboxd list (any name) for films you want checked aggressively -
+every single run - instead of waiting on the normal schedule below. Use it
+for anything whose tickets might go on sale with almost no notice. Films on
+it are tracked even if they're not on your watchlist, Letterboxd has no
+confirmed date yet, or they're a documentary (normally skipped).
 
 Can be a private list - use its share link as the Hype list URL. Only the
 first page (~28 films) of a private list is reachable, so keep it small.
