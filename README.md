@@ -115,7 +115,18 @@ Mercado 20, Cinemark Century San Mateo 12") you'd never actually go to. A
 showing that's only at blacklisted theaters is treated as if it were never
 on sale at all - not just "don't email about it" - so a real alert still
 fires the moment tickets reach anywhere else, instead of being suppressed
-forever because the status already flipped once.
+forever because the status already flipped once. The run log notes this
+each time it happens: `on sale only at blacklisted theater(s), skipping: ...`.
+
+Saving the list also retroactively cleans up alerts that are now
+worthless: a film stays alerted as long as at least one of the theaters
+that *actually triggered its alert* is still not blacklisted - getting one
+good alert already satisfied it, so a second theater joining later
+(blacklisted or not) doesn't undo that. Only a film whose alerted
+theater(s) are now *all* blacklisted gets cleared, making it eligible to
+alert again once it reaches a real one. The form shows which films, if
+any, got cleared; the same gets logged server-side as
+`Blacklist updated: cleared N now-worthless alert(s): ...`.
 
 ## How tracking works
 
@@ -196,6 +207,7 @@ python3 -m pytest -m live  # hits the real sites - run after touching a parser
 - Fandango/Letterboxd can change their HTML and silently break a parser.
   `pytest -m live` catches this, but only if you run it.
 - Fandango doesn't cover every theater, especially small/independent ones.
-- A `hot`/`recent` film that fails to match Fandango isn't retried until it
-  ages into `retired` (or is on Hype) - Letterboxd is only re-checked on the
-  slow tiers.
+- Once a film has alerted, a *second* real theater adding tickets later
+  doesn't trigger a second alert - one good alert is treated as enough.
+  `why.py` or the logs show the full live picture if you want to check
+  whether more theaters have since joined.

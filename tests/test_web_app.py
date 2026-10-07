@@ -71,7 +71,7 @@ def test_saving_blank_hype_list_clears_it_not_empty_string():
     assert repo.get_config().hype_list_url is None
 
 
-def test_saving_a_blacklist_clears_now_worthless_alerts():
+def test_saving_a_blacklist_clears_now_worthless_alerts(caplog):
     client, repo = _client()
     repo.sync_watchlist([Film(slug="singin-in-the-rain", title="Singin' in the Rain", year=1952, url=None)])
     repo.save_status(
@@ -86,12 +86,14 @@ def test_saving_a_blacklist_clears_now_worthless_alerts():
         alerted_theaters=["The New Parkway"],
     )
 
-    resp = client.post(
-        "/config/secret123",
-        data={"letterboxd_username": "dave", "zip_code": "94158", "blacklisted_theaters": "The New Parkway"},
-        follow_redirects=False,
-    )
+    with caplog.at_level("INFO"):
+        resp = client.post(
+            "/config/secret123",
+            data={"letterboxd_username": "dave", "zip_code": "94158", "blacklisted_theaters": "The New Parkway"},
+            follow_redirects=False,
+        )
     assert resp.headers["location"] == "/config/secret123?saved=1&cleared=Singin%27%20in%20the%20Rain"
+    assert "cleared 1 now-worthless alert(s): Singin' in the Rain" in caplog.text
 
     resp = client.get(resp.headers["location"])
     assert "Singin&#x27; in the Rain" in resp.text

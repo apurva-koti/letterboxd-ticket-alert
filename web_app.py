@@ -9,6 +9,7 @@ auth system - see modal_app.py for the multi-user plan this is step one of.
 from __future__ import annotations
 
 import html
+import logging
 from urllib.parse import quote
 
 from fastapi import FastAPI, Form, HTTPException
@@ -16,6 +17,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from domain import Config
 from repository import FilmRepository
+
+logger = logging.getLogger("letterboxd-ticket-alert")
 
 
 def create_app(
@@ -75,6 +78,9 @@ def create_app(
         # that. Only a now-worthless alert gets cleared, making that film
         # eligible to alert again once it reaches a real theater.
         cleared = repo.reapply_blacklist(new_blacklist)
+        if cleared:
+            titles = ", ".join(f.title for f in cleared)
+            logger.info(f"Blacklist updated: cleared {len(cleared)} now-worthless alert(s): {titles}")
         on_saved()
         cleared_param = quote("\x1f".join(f.title for f in cleared))
         return RedirectResponse(url=f"/config/{token}?saved=1&cleared={cleared_param}", status_code=303)

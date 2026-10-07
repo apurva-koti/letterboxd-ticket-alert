@@ -221,8 +221,11 @@ class Tracker:
             alerted_theaters=sorted(alertable_on_sale) if should_alert else None,
         )
 
+        blacklisted_on_sale = on_sale & blacklisted_theaters
         if should_alert:
             note = f", ALERT at {', '.join(sorted(alertable_on_sale))}"
+        elif blacklisted_on_sale and not alertable_on_sale:
+            note = f", on sale only at blacklisted theater(s), skipping: {', '.join(sorted(blacklisted_on_sale))}"
         elif not candidates:
             note = ", no Fandango listing found"
         else:

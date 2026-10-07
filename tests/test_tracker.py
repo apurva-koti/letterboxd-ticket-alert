@@ -140,6 +140,23 @@ def test_a_theater_merging_in_silently_does_not_get_credited_as_alerted(monkeypa
     assert tracked.alerted_theaters == ["AMC Mercado 20"]  # frozen: only what was actually alerted
 
 
+def test_logs_when_an_alert_is_skipped_for_being_blacklisted_only(monkeypatch, repo, caplog):
+    film = make_film(slug="singin-in-the-rain", title="Singin' in the Rain")
+    release = LetterboxdRelease(director=None, genres=[], poster_url=None, us_dates=[date(2026, 10, 2)])
+    lb = FakeLetterboxd(watchlist=[film], releases={"singin-in-the-rain": release})
+    listing = make_listing(fandango_id="1")
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [listing])
+
+    fandango = FakeFandango(showtimes={"1": make_showtime_check(on_sale_theaters=["The New Parkway"])})
+    _install_fandango(monkeypatch, fandango)
+
+    with caplog.at_level("INFO"):
+        result = Tracker(repo, lb).run("user", "94158", blacklisted_theaters=frozenset({"The New Parkway"}))
+
+    assert film not in result.alerted
+    assert "on sale only at blacklisted theater(s), skipping: The New Parkway" in caplog.text
+
+
 def test_documentary_is_excluded_and_never_matched(monkeypatch, repo):
     film = make_film(slug="nuisance-bear")
     release = LetterboxdRelease(director="A Director", genres=["documentary"], poster_url=None, us_dates=[date(2026, 1, 1)])
