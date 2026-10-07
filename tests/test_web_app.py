@@ -1,8 +1,14 @@
+from datetime import date, datetime, timezone
+
 from fastapi.testclient import TestClient
 
-from domain import Config
+from domain import Config, Film, Tier, TicketStatus
 from repository import FilmRepository
 from web_app import create_app
+
+
+def _now():
+    return datetime.now(timezone.utc)
 
 
 def _client(token="secret123", on_saved=lambda: None, on_read=lambda: None, seed_defaults=None):
@@ -48,7 +54,7 @@ def test_saving_round_trips_through_the_form():
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    assert resp.headers["location"] == "/config/secret123?saved=1"
+    assert resp.headers["location"] == "/config/secret123?saved=1&cleared="
 
     cfg = repo.get_config()
     assert cfg.letterboxd_username == "dave"
@@ -63,6 +69,25 @@ def test_saving_blank_hype_list_clears_it_not_empty_string():
     client, repo = _client()
     client.post("/config/secret123", data={"letterboxd_username": "dave", "zip_code": "94158", "hype_list_url": "  "})
     assert repo.get_config().hype_list_url is None
+
+
+def test_saving_a_blacklist_clears_now_worthless_alerts():
+    client, repo = _client()
+    repo.sync_watchlist([Film(slug="singin-in-the-rain", title="Singin' in the Rain", year=1952, url=None)])
+    repo.save_status(
+        "singin-in-the-rain", TicketStatus.ON_SALE, date(2026, 10, 7), ["The New Parkway"], [], True, Tier.RETIRED, _now()
+    )
+
+    resp = client.post(
+        "/config/secret123",
+        data={"letterboxd_username": "dave", "zip_code": "94158", "blacklisted_theaters": "The New Parkway"},
+        follow_redirects=False,
+    )
+    assert resp.headers["location"] == "/config/secret123?saved=1&cleared=Singin%27%20in%20the%20Rain"
+
+    resp = client.get(resp.headers["location"])
+    assert "Singin&#x27; in the Rain" in resp.text
+    assert repo.get("singin-in-the-rain").status == TicketStatus.NONE
 
 
 def test_save_and_read_hooks_fire():

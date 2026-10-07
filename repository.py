@@ -311,6 +311,34 @@ class FilmRepository:
         self.conn.execute("UPDATE ticket_status SET notified_at = ? WHERE letterboxd_slug = ?", (_now(), slug))
         self.conn.commit()
 
+    def reapply_blacklist(self, blacklisted_theaters: frozenset[str]) -> list[Film]:
+        """Call right after the blacklist changes. A film stays alerted as
+        long as at least one of its on-sale theaters is still not
+        blacklisted - once you've gotten a good alert, another theater
+        joining later doesn't warrant a second one. Only a film whose
+        on-sale theaters are now ALL blacklisted gets cleared, so it's
+        eligible to alert again once it reaches a real one. Recomputes
+        from the theater list already saved on each row - no Fandango
+        request needed. Returns the films that got cleared."""
+        rows = self.conn.execute(
+            """
+            SELECT films.slug, films.title, films.year, films.url, ticket_status.on_sale_theaters
+            FROM ticket_status JOIN films ON films.slug = ticket_status.letterboxd_slug
+            WHERE ticket_status.status = 'on_sale'
+            """
+        ).fetchall()
+        cleared = []
+        for row in rows:
+            theaters = set(json.loads(row["on_sale_theaters"])) if row["on_sale_theaters"] else set()
+            if theaters and not (theaters - blacklisted_theaters):
+                self.conn.execute(
+                    "UPDATE ticket_status SET status = 'none', alerted_at = NULL, notified_at = NULL WHERE letterboxd_slug = ?",
+                    (row["slug"],),
+                )
+                cleared.append(Film(slug=row["slug"], title=row["title"], year=row["year"], url=row["url"]))
+        self.conn.commit()
+        return cleared
+
     def get_config(self, defaults: Config | None = None) -> Config:
         """Returns the stored config, or `defaults` (seeded on first read)
         if nothing's been saved yet - so the form shows real values on its

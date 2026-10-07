@@ -17,6 +17,39 @@ def test_get_config_seeds_from_defaults_on_first_read():
     assert r.get_config() == defaults  # seeded - a second read needs no defaults
 
 
+def test_reapply_blacklist_clears_a_film_alerted_only_at_now_blacklisted_theaters():
+    r = repo()
+    r.sync_watchlist([make_film(slug="singin-in-the-rain", title="Singin' in the Rain", year=1952)])
+    now = datetime.now(timezone.utc)
+    r.save_status("singin-in-the-rain", TicketStatus.ON_SALE, date(2026, 10, 7), ["The New Parkway"], [], True, Tier.RETIRED, now)
+
+    cleared = r.reapply_blacklist(frozenset({"The New Parkway"}))
+
+    assert [f.slug for f in cleared] == ["singin-in-the-rain"]
+    tracked = r.get("singin-in-the-rain")
+    assert tracked.status == TicketStatus.NONE
+    assert tracked.alerted_at is None
+    assert tracked.notified_at is None
+
+
+def test_reapply_blacklist_leaves_a_film_alone_if_any_theater_survives():
+    """Getting one good alert already satisfied it - a second, blacklisted
+    theater also being on sale doesn't undo that."""
+    r = repo()
+    r.sync_watchlist([make_film(slug="pickpocket")])
+    now = datetime.now(timezone.utc)
+    r.save_status(
+        "pickpocket", TicketStatus.ON_SALE, date(2026, 10, 7), ["AMC Mercado 20", "AMC Metreon 16"], [], True, Tier.HOT, now
+    )
+
+    cleared = r.reapply_blacklist(frozenset({"AMC Mercado 20"}))
+
+    assert cleared == []
+    tracked = r.get("pickpocket")
+    assert tracked.status == TicketStatus.ON_SALE
+    assert tracked.alerted_at is not None
+
+
 def test_save_config_round_trips_blacklisted_theaters():
     r = repo()
     config = Config(

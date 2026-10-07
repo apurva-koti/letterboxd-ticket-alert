@@ -8,6 +8,9 @@ auth system - see modal_app.py for the multi-user plan this is step one of.
 
 from __future__ import annotations
 
+import html
+from urllib.parse import quote
+
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 
@@ -42,10 +45,11 @@ def create_app(
             raise HTTPException(status_code=404)
 
     @app.get("/config/{token}", response_class=HTMLResponse)
-    def show_form(token: str, saved: bool = False) -> str:
+    def show_form(token: str, saved: bool = False, cleared: str = "") -> str:
         _check_token(token)
         on_read()
-        return _render_form(token, repo.get_config(seed_defaults), saved)
+        cleared_titles = cleared.split("\x1f") if cleared else []
+        return _render_form(token, repo.get_config(seed_defaults), saved, cleared_titles)
 
     @app.post("/config/{token}")
     def save_form(
@@ -56,22 +60,36 @@ def create_app(
         blacklisted_theaters: str = Form(""),
     ) -> RedirectResponse:
         _check_token(token)
+        new_blacklist = frozenset(t.strip() for t in blacklisted_theaters.split(",") if t.strip())
         repo.save_config(
             Config(
                 letterboxd_username=letterboxd_username.strip(),
                 zip_code=zip_code.strip(),
                 hype_list_url=hype_list_url.strip() or None,
-                blacklisted_theaters=frozenset(t.strip() for t in blacklisted_theaters.split(",") if t.strip()),
+                blacklisted_theaters=new_blacklist,
             )
         )
+        # A film stays alerted unless EVERY on-sale theater it has is now
+        # blacklisted - getting one good alert already satisfied it, so a
+        # second theater joining later (blacklisted or not) doesn't undo
+        # that. Only a now-worthless alert gets cleared, making that film
+        # eligible to alert again once it reaches a real theater.
+        cleared = repo.reapply_blacklist(new_blacklist)
         on_saved()
-        return RedirectResponse(url=f"/config/{token}?saved=1", status_code=303)
+        cleared_param = quote("\x1f".join(f.title for f in cleared))
+        return RedirectResponse(url=f"/config/{token}?saved=1&cleared={cleared_param}", status_code=303)
 
     return app
 
 
-def _render_form(token: str, config: Config, saved: bool) -> str:
+def _render_form(token: str, config: Config, saved: bool, cleared_titles: list[str] | None = None) -> str:
     banner = '<p class="saved">Saved.</p>' if saved else ""
+    if cleared_titles:
+        items = "".join(f"<li>{html.escape(title)}</li>" for title in cleared_titles)
+        banner += (
+            '<p class="cleared">These were only on sale at theaters you just blacklisted - '
+            f"cleared, so you'll be alerted again once they reach a real theater:</p><ul>{items}</ul>"
+        )
     blacklist_text = ", ".join(sorted(config.blacklisted_theaters))
     return f"""<!doctype html>
 <html>
@@ -85,6 +103,7 @@ def _render_form(token: str, config: Config, saved: bool) -> str:
   .hint {{ color: #666; font-size: 0.85rem; margin-top: 0.2rem; }}
   button {{ margin-top: 1.5rem; padding: 0.6rem 1.2rem; font-size: 1rem; cursor: pointer; }}
   .saved {{ color: #1a7f37; font-weight: 600; }}
+  .cleared {{ color: #444; margin-top: 1rem; }}
 </style>
 </head>
 <body>
