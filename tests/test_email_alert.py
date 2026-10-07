@@ -20,7 +20,7 @@ def _decoded_parts(message_string):
 def test_format_alert_subject_is_loud_and_includes_title_year():
     notification = PendingNotification(
         film=make_film(title="Digger", year=2026, url="https://letterboxd.com/film/digger-2026/"),
-        on_sale_theaters=["AMC Kabuki 8"],
+        alerted_theaters=["AMC Kabuki 8"],
         ticket_url="https://www.fandango.com/digger-2026-245150/movie-overview",
     )
     subject, plain_body, html_body = email_alert.format_alert(notification)
@@ -41,7 +41,7 @@ def test_format_alert_subject_is_loud_and_includes_title_year():
 def test_render_html_includes_poster_image_when_present():
     notification = PendingNotification(
         film=make_film(title="Digger", year=2026),
-        on_sale_theaters=["AMC Kabuki 8"],
+        alerted_theaters=["AMC Kabuki 8"],
         ticket_url="https://www.fandango.com/digger-2026-245150/movie-overview",
         poster_url="https://a.ltrbxd.com/resized/film-poster/1/1/3/2/6/8/8/1132688-digger-2026-0-600-0-900-crop.jpg",
     )
@@ -54,7 +54,7 @@ def test_render_html_includes_poster_image_when_present():
 def test_render_html_omits_image_tag_when_no_poster():
     notification = PendingNotification(
         film=make_film(title="Digger", year=2026),
-        on_sale_theaters=["AMC Kabuki 8"],
+        alerted_theaters=["AMC Kabuki 8"],
         ticket_url="https://www.fandango.com/digger-2026-245150/movie-overview",
         poster_url=None,
     )
@@ -67,13 +67,13 @@ def test_render_html_omits_image_tag_when_no_poster():
 def test_format_alert_html_lists_every_theater():
     notification = PendingNotification(
         film=make_film(title="Primetime", year=2026),
-        on_sale_theaters=["AMC Kabuki 8", "AMC Metreon 16", "Landmark Opera Plaza"],
+        alerted_theaters=["AMC Kabuki 8", "AMC Metreon 16", "Landmark Opera Plaza"],
         ticket_url="https://www.fandango.com/primetime/movie-overview",
     )
     _, _, html_body = email_alert.format_alert(notification)
 
     assert html_body.count("<li") == 3
-    for theater in notification.on_sale_theaters:
+    for theater in notification.alerted_theaters:
         assert theater in html_body
 
 

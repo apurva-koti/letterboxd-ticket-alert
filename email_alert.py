@@ -51,7 +51,7 @@ def format_alert(notification: PendingNotification) -> tuple[str, str, str]:
     own email notifications, earlier in this project, was that email is easy
     to miss in a busy inbox. Filter this to Primary + a phone push-notification
     rule to close that gap."""
-    theaters = ", ".join(notification.on_sale_theaters)
+    theaters = ", ".join(notification.alerted_theaters)
     subject = f"🎟️ TICKETS ON SALE: {notification.film.title} ({notification.film.year})"
     plain_body = (
         f"{notification.film.title} ({notification.film.year})\n\n"
@@ -66,7 +66,7 @@ def _render_html(notification: PendingNotification) -> str:
     the reliably email-client-safe way to do multi-column layout, unlike
     modern CSS which Gmail and others support unevenly."""
     theaters_html = "".join(
-        f'<li style="margin:0 0 5px;">{theater}</li>' for theater in notification.on_sale_theaters
+        f'<li style="margin:0 0 5px;">{theater}</li>' for theater in notification.alerted_theaters
     )
     text_content = f"""\
   <div style="font-size:13px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;

@@ -21,7 +21,17 @@ def test_reapply_blacklist_clears_a_film_alerted_only_at_now_blacklisted_theater
     r = repo()
     r.sync_watchlist([make_film(slug="singin-in-the-rain", title="Singin' in the Rain", year=1952)])
     now = datetime.now(timezone.utc)
-    r.save_status("singin-in-the-rain", TicketStatus.ON_SALE, date(2026, 10, 7), ["The New Parkway"], [], True, Tier.RETIRED, now)
+    r.save_status(
+        "singin-in-the-rain",
+        TicketStatus.ON_SALE,
+        date(2026, 10, 7),
+        ["The New Parkway"],
+        [],
+        True,
+        Tier.RETIRED,
+        now,
+        alerted_theaters=["The New Parkway"],
+    )
 
     cleared = r.reapply_blacklist(frozenset({"The New Parkway"}))
 
@@ -32,14 +42,23 @@ def test_reapply_blacklist_clears_a_film_alerted_only_at_now_blacklisted_theater
     assert tracked.notified_at is None
 
 
-def test_reapply_blacklist_leaves_a_film_alone_if_any_theater_survives():
-    """Getting one good alert already satisfied it - a second, blacklisted
-    theater also being on sale doesn't undo that."""
+def test_reapply_blacklist_leaves_a_film_alone_if_any_alerted_theater_survives():
+    """Getting one good alert already satisfied it - a second theater
+    (blacklisted or not) joining later, with no new alert of its own,
+    doesn't undo that."""
     r = repo()
     r.sync_watchlist([make_film(slug="pickpocket")])
     now = datetime.now(timezone.utc)
     r.save_status(
-        "pickpocket", TicketStatus.ON_SALE, date(2026, 10, 7), ["AMC Mercado 20", "AMC Metreon 16"], [], True, Tier.HOT, now
+        "pickpocket",
+        TicketStatus.ON_SALE,
+        date(2026, 10, 7),
+        ["AMC Mercado 20", "AMC Metreon 16"],
+        [],
+        True,
+        Tier.HOT,
+        now,
+        alerted_theaters=["AMC Mercado 20", "AMC Metreon 16"],
     )
 
     cleared = r.reapply_blacklist(frozenset({"AMC Mercado 20"}))
@@ -48,6 +67,32 @@ def test_reapply_blacklist_leaves_a_film_alone_if_any_theater_survives():
     tracked = r.get("pickpocket")
     assert tracked.status == TicketStatus.ON_SALE
     assert tracked.alerted_at is not None
+
+
+def test_reapply_blacklist_ignores_theaters_that_joined_after_the_alert():
+    """on_sale_theaters keeps getting overwritten with whatever's live and
+    must NOT be what this checks - a theater that merged in after the
+    alert fired (no new alert of its own) is not part of what justified
+    it, so it shouldn't rescue a film whose actual alerted theater is now
+    blacklisted."""
+    r = repo()
+    r.sync_watchlist([make_film(slug="pickpocket")])
+    now = datetime.now(timezone.utc)
+    r.save_status(
+        "pickpocket",
+        TicketStatus.ON_SALE,
+        date(2026, 10, 7),
+        ["AMC Mercado 20", "AMC Metreon 16"],  # live picture: Metreon joined later
+        [],
+        True,
+        Tier.HOT,
+        now,
+        alerted_theaters=["AMC Mercado 20"],  # but only Mercado ever actually alerted
+    )
+
+    cleared = r.reapply_blacklist(frozenset({"AMC Mercado 20"}))
+
+    assert [f.slug for f in cleared] == ["pickpocket"]
 
 
 def test_save_config_round_trips_blacklisted_theaters():
@@ -137,12 +182,12 @@ def test_get_unnotified_only_returns_on_sale_without_notification():
     r.sync_watchlist([make_film(slug="a"), make_film(slug="b")])
     r.save_match("a", make_listing(slug="a-slug"), date(2026, 1, 1))
     now = datetime.now(timezone.utc)
-    r.save_status("a", TicketStatus.ON_SALE, date(2026, 1, 1), ["Theater A"], [], True, Tier.HOT, now)
+    r.save_status("a", TicketStatus.ON_SALE, date(2026, 1, 1), ["Theater A"], [], True, Tier.HOT, now, alerted_theaters=["Theater A"])
     r.save_status("b", TicketStatus.SHOWTIMES_ANNOUNCED, date(2026, 1, 1), [], ["Theater B"], False, Tier.HOT, now)
 
     pending = r.get_unnotified()
     assert [p.film.slug for p in pending] == ["a"]
-    assert pending[0].on_sale_theaters == ["Theater A"]
+    assert pending[0].alerted_theaters == ["Theater A"]
 
 
 def test_mark_notified_removes_from_unnotified():

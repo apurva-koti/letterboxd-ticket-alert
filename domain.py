@@ -73,6 +73,7 @@ class TrackedFilm:
     status: TicketStatus
     on_sale_theaters: list[str]
     showtimes_only_theaters: list[str]
+    alerted_theaters: list[str]
     tier: Tier | None
     next_check_at: datetime | None
     alerted_at: datetime | None
@@ -83,7 +84,7 @@ class TrackedFilm:
 @dataclass
 class PendingNotification:
     film: Film
-    on_sale_theaters: list[str]
+    alerted_theaters: list[str]
     ticket_url: str | None
     poster_url: str | None = None
 

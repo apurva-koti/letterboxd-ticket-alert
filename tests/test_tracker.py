@@ -87,6 +87,7 @@ def test_run_matches_and_checks_a_new_upcoming_film(monkeypatch, repo):
     assert film in result.alerted
     tracked = repo.get("digger-2026")
     assert tracked.fandango.fandango_id == "245150"
+    assert tracked.alerted_theaters == ["Alamo Drafthouse"]
     assert tracked.status == TicketStatus.ON_SALE
 
 
@@ -107,6 +108,36 @@ def test_alert_fires_only_on_transition_into_on_sale(monkeypatch, repo):
     result = Tracker(repo, lb).run("user", "94158")
 
     assert film not in result.alerted  # still on_sale, not a new transition
+
+
+def test_a_theater_merging_in_silently_does_not_get_credited_as_alerted(monkeypatch, repo):
+    """Regression test for a real production incident: a film alerted on
+    one theater, then a second, different real theater also went on sale
+    while status stayed on_sale - no new alert fired (correct, per design),
+    but alerted_theaters must stay frozen at the first theater, not silently
+    absorb the second one just because on_sale_theaters keeps getting
+    overwritten with the current live picture."""
+    film = make_film(slug="pickpocket")
+    release = LetterboxdRelease(director=None, genres=[], poster_url=None, us_dates=[date(2026, 10, 2)])
+    lb = FakeLetterboxd(watchlist=[film], releases={"pickpocket": release})
+    listing = make_listing(fandango_id="1")
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [listing])
+
+    fandango = FakeFandango(showtimes={"1": make_showtime_check(on_sale_theaters=["AMC Mercado 20"])})
+    _install_fandango(monkeypatch, fandango)
+    Tracker(repo, lb).run("user", "94158")
+    assert repo.get("pickpocket").alerted_theaters == ["AMC Mercado 20"]
+
+    conn = repo.conn
+    conn.execute("UPDATE ticket_status SET next_check_at = ?", ((datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),))
+    conn.commit()
+    fandango.showtimes["1"] = make_showtime_check(on_sale_theaters=["AMC Mercado 20", "AMC Metreon 16"])
+    result = Tracker(repo, lb).run("user", "94158")
+
+    assert film not in result.alerted  # still on_sale, not a new transition
+    tracked = repo.get("pickpocket")
+    assert tracked.on_sale_theaters == ["AMC Mercado 20", "AMC Metreon 16"]  # live picture: both
+    assert tracked.alerted_theaters == ["AMC Mercado 20"]  # frozen: only what was actually alerted
 
 
 def test_documentary_is_excluded_and_never_matched(monkeypatch, repo):

@@ -75,7 +75,15 @@ def test_saving_a_blacklist_clears_now_worthless_alerts():
     client, repo = _client()
     repo.sync_watchlist([Film(slug="singin-in-the-rain", title="Singin' in the Rain", year=1952, url=None)])
     repo.save_status(
-        "singin-in-the-rain", TicketStatus.ON_SALE, date(2026, 10, 7), ["The New Parkway"], [], True, Tier.RETIRED, _now()
+        "singin-in-the-rain",
+        TicketStatus.ON_SALE,
+        date(2026, 10, 7),
+        ["The New Parkway"],
+        [],
+        True,
+        Tier.RETIRED,
+        _now(),
+        alerted_theaters=["The New Parkway"],
     )
 
     resp = client.post(

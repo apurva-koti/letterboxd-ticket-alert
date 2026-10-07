@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS ticket_status (
     showtimes_only_theaters TEXT,
     updated_at TEXT NOT NULL,
     alerted_at TEXT,
+    alerted_theaters TEXT,
     tier TEXT,
     next_check_at TEXT,
     notified_at TEXT
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS config (
 MIGRATIONS = [
     "ALTER TABLE fandango_matches ADD COLUMN director TEXT",
     "ALTER TABLE fandango_matches ADD COLUMN runtime INTEGER",
+    "ALTER TABLE ticket_status ADD COLUMN alerted_theaters TEXT",
 ]
 
 
@@ -174,6 +176,7 @@ class FilmRepository:
         status = TicketStatus.NONE
         on_sale_theaters: list[str] = []
         showtimes_only_theaters: list[str] = []
+        alerted_theaters: list[str] = []
         tier = None
         next_check_at = None
         alerted_at = None
@@ -184,6 +187,7 @@ class FilmRepository:
             showtimes_only_theaters = (
                 json.loads(status_row["showtimes_only_theaters"]) if status_row["showtimes_only_theaters"] else []
             )
+            alerted_theaters = json.loads(status_row["alerted_theaters"]) if status_row["alerted_theaters"] else []
             tier = Tier(status_row["tier"]) if status_row["tier"] else None
             next_check_at = _parse_dt(status_row["next_check_at"])
             alerted_at = _parse_dt(status_row["alerted_at"])
@@ -200,6 +204,7 @@ class FilmRepository:
             status=status,
             on_sale_theaters=on_sale_theaters,
             showtimes_only_theaters=showtimes_only_theaters,
+            alerted_theaters=alerted_theaters,
             tier=tier,
             next_check_at=next_check_at,
             alerted_at=alerted_at,
@@ -257,18 +262,32 @@ class FilmRepository:
         alerted: bool,
         tier: Tier,
         next_check_at: datetime,
+        alerted_theaters: list[str] | None = None,
     ) -> None:
+        """`on_sale_theaters` is the full live picture as of this check -
+        always overwritten, purely for display/diagnostics (why.py). It is
+        NOT what drives re-alerting or the email: `alerted_theaters` is the
+        frozen subset that actually justified the most recent alert, only
+        ever updated when `alerted` is True (same CASE pattern as
+        `alerted_at`) - so a theater merging in silently on a later check,
+        with no new alert, never gets credited as "already told to the
+        user" (confirmed necessary in production: a second real theater
+        joined while status stayed on_sale, and nothing further to read
+        from on_sale_theaters alone could tell the difference)."""
         self.conn.execute(
             """
             INSERT INTO ticket_status
                 (letterboxd_slug, status, status_date, on_sale_theaters, showtimes_only_theaters,
-                 updated_at, alerted_at, tier, next_check_at)
-            VALUES (:slug, :status, :date, :on_sale, :showtimes_only, :now, :alerted_at, :tier, :next_check)
+                 updated_at, alerted_at, alerted_theaters, tier, next_check_at)
+            VALUES (:slug, :status, :date, :on_sale, :showtimes_only, :now, :alerted_at, :alerted_theaters, :tier, :next_check)
             ON CONFLICT(letterboxd_slug) DO UPDATE SET
                 status = excluded.status, status_date = excluded.status_date,
                 on_sale_theaters = excluded.on_sale_theaters, showtimes_only_theaters = excluded.showtimes_only_theaters,
                 updated_at = excluded.updated_at,
                 alerted_at = CASE WHEN excluded.alerted_at IS NOT NULL THEN excluded.alerted_at ELSE ticket_status.alerted_at END,
+                alerted_theaters = CASE
+                    WHEN excluded.alerted_at IS NOT NULL THEN excluded.alerted_theaters ELSE ticket_status.alerted_theaters
+                END,
                 notified_at = CASE WHEN excluded.status != 'on_sale' THEN NULL ELSE ticket_status.notified_at END,
                 tier = excluded.tier, next_check_at = excluded.next_check_at
             """,
@@ -280,6 +299,7 @@ class FilmRepository:
                 "showtimes_only": json.dumps(showtimes_only_theaters) if showtimes_only_theaters else None,
                 "now": _now(),
                 "alerted_at": _now() if alerted else None,
+                "alerted_theaters": json.dumps(alerted_theaters) if alerted_theaters else None,
                 "tier": tier.value,
                 "next_check": next_check_at.isoformat(),
             },
@@ -287,10 +307,14 @@ class FilmRepository:
         self.conn.commit()
 
     def get_unnotified(self) -> list[PendingNotification]:
+        """Built from alerted_theaters, not on_sale_theaters - the email
+        should only ever list the theaters that actually justified this
+        alert (already blacklist-filtered), not whatever else happens to
+        be on sale by the time the email actually sends."""
         rows = self.conn.execute(
             """
             SELECT films.slug, films.title, films.year, films.url,
-                   ticket_status.on_sale_theaters, fandango_matches.fandango_slug, fandango_matches.poster_url
+                   ticket_status.alerted_theaters, fandango_matches.fandango_slug, fandango_matches.poster_url
             FROM ticket_status
             JOIN films ON films.slug = ticket_status.letterboxd_slug
             LEFT JOIN fandango_matches ON fandango_matches.letterboxd_slug = ticket_status.letterboxd_slug
@@ -300,7 +324,7 @@ class FilmRepository:
         return [
             PendingNotification(
                 film=Film(slug=row["slug"], title=row["title"], year=row["year"], url=row["url"]),
-                on_sale_theaters=json.loads(row["on_sale_theaters"]) if row["on_sale_theaters"] else [],
+                alerted_theaters=json.loads(row["alerted_theaters"]) if row["alerted_theaters"] else [],
                 ticket_url=f"https://www.fandango.com/{row['fandango_slug']}/movie-overview" if row["fandango_slug"] else row["url"],
                 poster_url=row["poster_url"],
             )
@@ -312,27 +336,38 @@ class FilmRepository:
         self.conn.commit()
 
     def reapply_blacklist(self, blacklisted_theaters: frozenset[str]) -> list[Film]:
-        """Call right after the blacklist changes. A film stays alerted as
-        long as at least one of its on-sale theaters is still not
-        blacklisted - once you've gotten a good alert, another theater
-        joining later doesn't warrant a second one. Only a film whose
-        on-sale theaters are now ALL blacklisted gets cleared, so it's
-        eligible to alert again once it reaches a real one. Recomputes
-        from the theater list already saved on each row - no Fandango
-        request needed. Returns the films that got cleared."""
+        """Call right after the blacklist changes. Checks alerted_theaters
+        - the frozen set that actually justified the current alert - not
+        on_sale_theaters, which keeps getting overwritten with whatever's
+        live and would hide the fact that a second, real theater joined
+        later without ever being its own alert (confirmed in production:
+        Pickpocket alerted on Mercado alone, Metreon joined silently
+        afterward with on new alert, and checking the live, merged theater
+        list made Mercado's blacklisting look like nothing needed fixing).
+        A film stays alerted as long as the theater(s) that actually
+        justified its current alert aren't ALL blacklisted - getting one
+        good alert already satisfied it, and a second theater joining
+        later doesn't warrant a second one regardless of blacklist status.
+        Only a film whose alerted theaters are now entirely blacklisted
+        gets cleared, so it's eligible to alert again once it reaches a
+        real one. Recomputes from data already saved on each row - no
+        Fandango request needed. Returns the films that got cleared."""
         rows = self.conn.execute(
             """
-            SELECT films.slug, films.title, films.year, films.url, ticket_status.on_sale_theaters
+            SELECT films.slug, films.title, films.year, films.url, ticket_status.alerted_theaters
             FROM ticket_status JOIN films ON films.slug = ticket_status.letterboxd_slug
             WHERE ticket_status.status = 'on_sale'
             """
         ).fetchall()
         cleared = []
         for row in rows:
-            theaters = set(json.loads(row["on_sale_theaters"])) if row["on_sale_theaters"] else set()
+            theaters = set(json.loads(row["alerted_theaters"])) if row["alerted_theaters"] else set()
             if theaters and not (theaters - blacklisted_theaters):
                 self.conn.execute(
-                    "UPDATE ticket_status SET status = 'none', alerted_at = NULL, notified_at = NULL WHERE letterboxd_slug = ?",
+                    """
+                    UPDATE ticket_status SET status = 'none', alerted_at = NULL, alerted_theaters = NULL, notified_at = NULL
+                    WHERE letterboxd_slug = ?
+                    """,
                     (row["slug"],),
                 )
                 cleared.append(Film(slug=row["slug"], title=row["title"], year=row["year"], url=row["url"]))

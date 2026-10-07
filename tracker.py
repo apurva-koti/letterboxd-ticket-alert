@@ -210,11 +210,19 @@ class Tracker:
 
         self.repo.save_match(film.slug, active, anchor, director=director, runtime=runtime, poster_url=poster_url)
         self.repo.save_status(
-            film.slug, new_status, today, sorted(on_sale), sorted(showtimes_only), should_alert, tier, next_check_at(tier, now)
+            film.slug,
+            new_status,
+            today,
+            sorted(on_sale),
+            sorted(showtimes_only),
+            should_alert,
+            tier,
+            next_check_at(tier, now),
+            alerted_theaters=sorted(alertable_on_sale) if should_alert else None,
         )
 
         if should_alert:
-            note = f", ALERT at {', '.join(sorted(on_sale))}"
+            note = f", ALERT at {', '.join(sorted(alertable_on_sale))}"
         elif not candidates:
             note = ", no Fandango listing found"
         else:
