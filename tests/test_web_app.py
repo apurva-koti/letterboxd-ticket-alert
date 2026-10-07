@@ -1,12 +1,13 @@
 from fastapi.testclient import TestClient
 
+from domain import Config
 from repository import FilmRepository
 from web_app import create_app
 
 
-def _client(token="secret123", on_saved=lambda: None, on_read=lambda: None):
+def _client(token="secret123", on_saved=lambda: None, on_read=lambda: None, seed_defaults=None):
     repo = FilmRepository.connect(":memory:")
-    app = create_app(repo, token, on_saved=on_saved, on_read=on_read)
+    app = create_app(repo, token, on_saved=on_saved, on_read=on_read, seed_defaults=seed_defaults)
     return TestClient(app), repo
 
 
@@ -21,6 +22,17 @@ def test_first_load_shows_blank_form():
     resp = client.get("/config/secret123")
     assert resp.status_code == 200
     assert "Letterboxd username" in resp.text
+
+
+def test_first_load_seeds_from_defaults_instead_of_blank():
+    """Regression test for a real production incident: loading this page
+    before the scheduler's first-ever run seeded the config row empty,
+    since the form passed no defaults of its own."""
+    defaults = Config(letterboxd_username="dave", zip_code="94158", hype_list_url=None, blacklisted_theaters=frozenset())
+    client, repo = _client(seed_defaults=defaults)
+    resp = client.get("/config/secret123")
+    assert 'value="dave"' in resp.text
+    assert repo.get_config() == defaults
 
 
 def test_saving_round_trips_through_the_form():

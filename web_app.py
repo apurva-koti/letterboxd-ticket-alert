@@ -16,7 +16,11 @@ from repository import FilmRepository
 
 
 def create_app(
-    repo: FilmRepository, access_token: str, on_saved=lambda: None, on_read=lambda: None
+    repo: FilmRepository,
+    access_token: str,
+    on_saved=lambda: None,
+    on_read=lambda: None,
+    seed_defaults: Config | None = None,
 ) -> FastAPI:
     """`on_saved` runs after every successful save - on Modal, this commits
     the Volume so the write is durable and visible to the scheduler's
@@ -25,7 +29,12 @@ def create_app(
     Modal's Volume.reload() refuses to run while this container's own
     sqlite connection holds state.db open, and it isn't needed for
     correctness here anyway since the scheduler always opens its own fresh
-    connection and sees the latest commit regardless."""
+    connection and sees the latest commit regardless. `seed_defaults`
+    matters only on the very first-ever load, before any config row
+    exists - pass the same defaults the scheduler seeds from, or whichever
+    of the two runs first wins and the other seeds blank (confirmed in
+    production: loading this page before the scheduler's first run ever
+    fired seeded the row empty)."""
     app = FastAPI()
 
     def _check_token(token: str) -> None:
@@ -36,7 +45,7 @@ def create_app(
     def show_form(token: str, saved: bool = False) -> str:
         _check_token(token)
         on_read()
-        return _render_form(token, repo.get_config(), saved)
+        return _render_form(token, repo.get_config(seed_defaults), saved)
 
     @app.post("/config/{token}")
     def save_form(

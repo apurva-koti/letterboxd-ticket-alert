@@ -16,6 +16,23 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("letterboxd-ticket-alert")
 
 
+def _env_config_defaults():
+    """The one-time seed for the `config` DB table, read from env vars /
+    the app-config Secret. Shared by run_scheduler and config_ui so
+    whichever happens to run first seeds the same real values, not blank
+    ones (confirmed in production: loading the form before the scheduler's
+    first-ever run seeded the row empty)."""
+    import config as env_config
+    from domain import Config
+
+    return Config(
+        letterboxd_username=env_config.LETTERBOXD_USERNAME,
+        zip_code=env_config.ZIP_CODE,
+        hype_list_url=env_config.HYPE_LIST_URL,
+        blacklisted_theaters=env_config.BLACKLISTED_THEATERS,
+    )
+
+
 def _is_transient_failure(exc: Exception) -> bool:
     """A connectivity hiccup or a 5xx from the site's own server - both
     confirmed in production to self-heal within a cron cycle or two, so not
@@ -62,9 +79,7 @@ config_ui_secret = modal.Secret.from_name("config-ui")
     region="us",
 )
 def run_scheduler() -> None:
-    import config as env_config
     import email_alert
-    from domain import Config
     from letterboxd_client import LetterboxdClient
     from repository import FilmRepository
     from tracker import Tracker
@@ -74,14 +89,7 @@ def run_scheduler() -> None:
     repo = FilmRepository.connect(DB_PATH)
     # Seeds from the env-var config on the very first run only - from then
     # on the DB (editable via the /config web form) is the source of truth.
-    cfg = repo.get_config(
-        defaults=Config(
-            letterboxd_username=env_config.LETTERBOXD_USERNAME,
-            zip_code=env_config.ZIP_CODE,
-            hype_list_url=env_config.HYPE_LIST_URL,
-            blacklisted_theaters=env_config.BLACKLISTED_THEATERS,
-        )
-    )
+    cfg = repo.get_config(defaults=_env_config_defaults())
     logger.info(f"Run starting: username={cfg.letterboxd_username} zip={cfg.zip_code}")
 
     pending = []
@@ -147,7 +155,12 @@ def config_ui():
     # any file on the volume is open (confirmed in production - 500s every
     # request). Not needed for correctness anyway - the scheduler opens its
     # own fresh connection every run and always sees the latest commit.
-    return create_app(repo, os.environ["CONFIG_ACCESS_TOKEN"], on_saved=volume.commit)
+    return create_app(
+        repo,
+        os.environ["CONFIG_ACCESS_TOKEN"],
+        on_saved=volume.commit,
+        seed_defaults=_env_config_defaults(),
+    )
 
 
 @app.local_entrypoint()
