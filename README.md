@@ -2,39 +2,11 @@
 
 Watches a Letterboxd watchlist, figures out when a film's tickets go on sale
 near your zip code, and emails you. Runs unattended on
-[Modal](https://modal.com).
+[Modal](https://modal.com). Built because Fandango's own ticket alerts are
+email-only and easy to miss.
 
-## Why
-
-Fandango's own ticket alerts are email-only and easy to miss. This instead:
-
-- Uses Letterboxd's release table as the source of truth for whether/when a
-  film has a US release - including re-releases, which get their own dated
-  entry there
-- Matches that date to the right Fandango listing (a re-release is often a
-  separate, oddly-titled listing, like "Moonlight 10th Anniversary
-  Remastered")
-- Polls Fandango on a tiered schedule and tells "showtimes listed" apart
-  from "tickets actually purchasable"
-- Emails a loud alert with the poster the moment tickets go on sale, and
-  retries if the send fails
-
-## Layout
-
-| File | Does |
-|---|---|
-| `domain.py` | Shared types (`Tier`, `TicketStatus`, `Film`, ...) |
-| `tiering.py` | How often a film gets checked |
-| `letterboxd_client.py` | Scrapes the watchlist, lists, and release tables |
-| `fandango_client.py` | Fandango search, lookups, live showtimes |
-| `matcher.py` | Picks the right Fandango listing for a given date |
-| `repository.py` | SQLite persistence (`state.db`) |
-| `tracker.py` | One run: sync, match, check, alert |
-| `email_alert.py` | Gmail SMTP, HTML email with poster |
-| `config.py` | Your personal config (first-run defaults; see Settings below) |
-| `web_app.py` | The settings form served at `/config/<token>` |
-| `modal_app.py` | The deployed cron + the settings-form web endpoint |
-| `why.py` | Diagnostic: why is/isn't a film being tracked |
+This README starts with what to do, then gets progressively deeper into how
+it actually works - skip ahead once you've got what you need.
 
 ## Setup
 
@@ -54,10 +26,11 @@ cp local_config.example.json local_config.json
 Fill in:
 - `LETTERBOXD_USERNAME`
 - `ZIP_CODE`
-- `HYPE_LIST_URL` (optional, see Hype below)
+- `HYPE_LIST_URL` (optional, see Hype further down)
 
 `config.py` checks environment variables first, then `local_config.json` -
-same values work locally and on Modal.
+same values work locally and on Modal. (These only matter for the very
+first run - see Settings below for how to change them afterward.)
 
 ### 2. Gmail
 
@@ -128,18 +101,63 @@ alert again once it reaches a real one. The form shows which films, if
 any, got cleared; the same gets logged server-side as
 `Blacklist updated: cleared N now-worthless alert(s): ...`.
 
+### Hype
+
+For films whose tickets go on sale with almost no notice - the normal
+tiered schedule (see below) isn't fast enough. Make a Letterboxd list (any
+name) and add films to it:
+
+- Tracked even if not on your watchlist
+- Documentaries not excluded
+- Checked (and re-matched) every single run, even before Letterboxd has a
+  confirmed date
+
+Can be a private list - use its share link as the Hype list URL. Only the
+first page (~28 films) of a private list is reachable, so keep it small.
+
+## Diagnosing a film
+
+```bash
+python3 why.py "Dune: Part Three"
+```
+
+Prints its anchor date, Fandango match, status, tier, and next check time -
+the quickest way to see what the tracker currently thinks about a film,
+without digging into the database by hand.
+
+## Testing
+
+```bash
+python3 -m pytest          # fast, no network (fixtures are real saved HTML)
+python3 -m pytest -m live  # hits the real sites - run after touching a parser
+```
+
+---
+
+Everything below explains how it actually works - useful if you're
+debugging something, extending it, or just curious.
+
 ## How tracking works
 
-Letterboxd decides *whether and when* a film is really releasing in the US.
-Fandango only gets involved once Letterboxd has a date. Fandango's own
-listings are matched by title, director, synopsis, runtime, and year, in
-that order - never by Fandango's own stored release date, which can go
-stale on a reused listing. Every listing that plausibly matches gets
-checked for live showtimes; there's rarely just one "right" listing for a
-re-release.
+Letterboxd decides *whether and when* a film is really releasing in the US,
+using its release table as the source of truth - including re-releases,
+which get their own dated entry there. Fandango only gets involved once
+Letterboxd has a date, and purely to check live showtimes - its listings are
+matched by title, director, synopsis, runtime, and year, in that order,
+*never* by Fandango's own stored release date, which can go stale on a
+reused listing (a re-release sometimes gets a brand-new, oddly-titled
+Fandango listing, like "Moonlight 10th Anniversary Remastered," and
+sometimes just reuses the original one without its date ever updating).
+Every listing that plausibly matches gets checked for live showtimes, told
+apart as "showtimes listed" vs. "tickets actually purchasable" - there's
+rarely just one "right" listing for a re-release, so no single one is
+picked in advance.
 
-Tier is recomputed every check, so a film moves between tiers on its own as
-its date approaches and passes:
+The moment tickets are purchasable, it emails a loud alert with the poster,
+and retries if the send fails.
+
+Tier controls how often a film gets checked, and is recomputed every check,
+so a film moves between tiers on its own as its date approaches and passes:
 
 | Tier | When | Checked |
 |---|---|---|
@@ -160,20 +178,6 @@ a new matching listing can appear on Fandango at any point.
 Documentaries are skipped entirely (Fandango doesn't track them reliably)
 unless the film is on Hype.
 
-### Hype
-
-For films whose tickets go on sale with almost no notice - `hot`'s 3-hour
-cadence isn't fast enough. Make a Letterboxd list (any name) and add films
-to it:
-
-- Tracked even if not on your watchlist
-- Documentaries not excluded
-- Checked (and re-matched) every single run, even before Letterboxd has a
-  confirmed date
-
-Can be a private list - use its share link as `HYPE_LIST_URL`. Only the
-first page (~28 films) of a private list is reachable, so keep it small.
-
 ## Resilience
 
 Runs every 15 minutes, so tolerating flaky sites matters:
@@ -187,20 +191,22 @@ Runs every 15 minutes, so tolerating flaky sites matters:
 - Only actionable failures email you - a timeout or 5xx that self-heals on
   its own doesn't.
 
-## Diagnosing a film
+## Layout
 
-```bash
-python3 why.py "Dune: Part Three"
-```
-
-Prints its anchor date, Fandango match, status, tier, and next check time.
-
-## Testing
-
-```bash
-python3 -m pytest          # fast, no network (fixtures are real saved HTML)
-python3 -m pytest -m live  # hits the real sites - run after touching a parser
-```
+| File | Does |
+|---|---|
+| `domain.py` | Shared types (`Tier`, `TicketStatus`, `Film`, ...) |
+| `tiering.py` | How often a film gets checked |
+| `letterboxd_client.py` | Scrapes the watchlist, lists, and release tables |
+| `fandango_client.py` | Fandango search, lookups, live showtimes |
+| `matcher.py` | Finds every plausible Fandango listing for a film |
+| `repository.py` | SQLite persistence (`state.db`) |
+| `tracker.py` | One run: sync, match, check, alert |
+| `email_alert.py` | Gmail SMTP, HTML email with poster |
+| `config.py` | Your personal config (first-run defaults; see Settings above) |
+| `web_app.py` | The settings form served at `/config/<token>` |
+| `modal_app.py` | The deployed cron + the settings-form web endpoint |
+| `why.py` | Diagnostic: why is/isn't a film being tracked |
 
 ## Known limitations
 
