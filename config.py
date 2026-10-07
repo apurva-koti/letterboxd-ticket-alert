@@ -31,3 +31,10 @@ def _get(key: str) -> str | None:
 LETTERBOXD_USERNAME = _get("LETTERBOXD_USERNAME")
 ZIP_CODE = _get("ZIP_CODE")
 HYPE_LIST_URL = _get("HYPE_LIST_URL")  # a Letterboxd list of must-watch films - see README
+
+# Theaters you'd never actually go to, comma-separated, matched against
+# Fandango's own theater names (e.g. "AMC Mercado 20, Cinemark Century San Mateo 12").
+# A showing that's only at blacklisted theaters is treated as if it were
+# never on sale at all - so a real alert still fires the moment it reaches
+# anywhere else, instead of being permanently suppressed.
+BLACKLISTED_THEATERS = frozenset(t.strip() for t in (_get("BLACKLISTED_THEATERS") or "").split(",") if t.strip())

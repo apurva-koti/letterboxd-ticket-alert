@@ -89,6 +89,18 @@ class PendingNotification:
 
 
 @dataclass
+class Config:
+    """Account-level settings, stored in the DB so they're editable from the
+    config web form instead of baked in at deploy time. Single-user for now
+    - see repository.py's config table."""
+
+    letterboxd_username: str | None
+    zip_code: str | None
+    hype_list_url: str | None
+    blacklisted_theaters: frozenset[str]
+
+
+@dataclass
 class RunResult:
     added: list[Film] = field(default_factory=list)
     removed: list[Film] = field(default_factory=list)

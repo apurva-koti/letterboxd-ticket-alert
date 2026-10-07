@@ -2,3 +2,6 @@ requests
 beautifulsoup4
 pytest
 modal
+fastapi
+python-multipart
+httpx

@@ -31,8 +31,9 @@ Fandango's own ticket alerts are email-only and easy to miss. This instead:
 | `repository.py` | SQLite persistence (`state.db`) |
 | `tracker.py` | One run: sync, match, check, alert |
 | `email_alert.py` | Gmail SMTP, HTML email with poster |
-| `config.py` | Your personal config |
-| `modal_app.py` | The deployed cron |
+| `config.py` | Your personal config (first-run defaults; see Settings below) |
+| `web_app.py` | The settings form served at `/config/<token>` |
+| `modal_app.py` | The deployed cron + the settings-form web endpoint |
 | `why.py` | Diagnostic: why is/isn't a film being tracked |
 
 ## Setup
@@ -79,18 +80,52 @@ modal secret create app-config \
   ZIP_CODE=10001 \
   HYPE_LIST_URL="https://letterboxd.com/you/list/hype/share/token/"
 
+modal secret create config-ui \
+  CONFIG_ACCESS_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+
 modal deploy modal_app.py
 ```
 
 Runs on a 15-minute cron from there. `modal run modal_app.py` triggers one
 manual run if you want to check setup first.
 
+## Settings
+
+After the first run, your settings (Letterboxd username, zip, Hype list,
+blacklisted theaters) live in the database, not `config.py` - `config.py`'s
+values are only the one-time seed. Edit them at:
+
+```
+https://<your-modal-app-url>/config/<CONFIG_ACCESS_TOKEN>
+```
+
+The token in the URL stands in for a login - there's no account system yet
+(single-user, see "Blacklisted theaters" below), so don't share the link.
+Find your app's URL and the token with:
+
+```bash
+modal app list                       # shows the config_ui endpoint's URL
+modal secret list                    # confirms config-ui exists
+```
+
+### Blacklisted theaters
+
+Comma-separated theater names (matching Fandango's exactly, e.g. "AMC
+Mercado 20, Cinemark Century San Mateo 12") you'd never actually go to. A
+showing that's only at blacklisted theaters is treated as if it were never
+on sale at all - not just "don't email about it" - so a real alert still
+fires the moment tickets reach anywhere else, instead of being suppressed
+forever because the status already flipped once.
+
 ## How tracking works
 
 Letterboxd decides *whether and when* a film is really releasing in the US.
-Fandango only gets involved once Letterboxd has a date, and is matched by
-release-date proximity, not title - titles alone can't tell a re-release
-apart, or two different films with the same name.
+Fandango only gets involved once Letterboxd has a date. Fandango's own
+listings are matched by title, director, synopsis, runtime, and year, in
+that order - never by Fandango's own stored release date, which can go
+stale on a reused listing. Every listing that plausibly matches gets
+checked for live showtimes; there's rarely just one "right" listing for a
+re-release.
 
 Tier is recomputed every check, so a film moves between tiers on its own as
 its date approaches and passes:
@@ -103,11 +138,13 @@ its date approaches and passes:
 | `far_future` / `unknown` | Releasing >90 days out, or no date yet | every ~24h |
 | `retired` | Released over 30 days ago | every ~7 days |
 
-`retired` films keep no Fandango listing - nothing left to poll, and if a
-re-release is coming, Letterboxd shows it first. Each retired check just
-looks at Letterboxd again; if a new, later date shows up, that's the signal
-to search Fandango fresh and start polling again. Other tiers trust the
-Fandango listing they already have and don't re-check Letterboxd.
+A `retired` or `unknown` film re-checks Letterboxd first (in case a new
+release date showed up), then searches Fandango fresh regardless - a
+re-release can surface on Fandango before Letterboxd lists a new date for
+it, so neither source is trusted blindly over the other. Other tiers trust
+the anchor date they already have and skip the Letterboxd re-check, but
+still search Fandango fresh every time - nothing is cached long-term, since
+a new matching listing can appear on Fandango at any point.
 
 Documentaries are skipped entirely (Fandango doesn't track them reliably)
 unless the film is on Hype.

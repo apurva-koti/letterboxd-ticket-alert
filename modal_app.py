@@ -32,7 +32,7 @@ app = modal.App("letterboxd-ticket-alert")
 
 image = (
     modal.Image.debian_slim()
-    .uv_pip_install("requests", "beautifulsoup4")
+    .uv_pip_install("requests", "beautifulsoup4", "fastapi", "python-multipart")
     .add_local_python_source(
         "domain",
         "tiering",
@@ -43,12 +43,14 @@ image = (
         "tracker",
         "email_alert",
         "config",
+        "web_app",
     )
 )
 
 volume = modal.Volume.from_name("letterboxd-ticket-alert-db", create_if_missing=True)
 gmail_secret = modal.Secret.from_name("gmail-credentials")
 app_config_secret = modal.Secret.from_name("app-config")
+config_ui_secret = modal.Secret.from_name("config-ui")
 
 
 @app.function(
@@ -60,20 +62,35 @@ app_config_secret = modal.Secret.from_name("app-config")
     region="us",
 )
 def run_scheduler() -> None:
-    import config
+    import config as env_config
     import email_alert
+    from domain import Config
     from letterboxd_client import LetterboxdClient
     from repository import FilmRepository
     from tracker import Tracker
 
     start = time.monotonic()
-    logger.info(f"Run starting: username={config.LETTERBOXD_USERNAME} zip={config.ZIP_CODE}")
 
     repo = FilmRepository.connect(DB_PATH)
+    # Seeds from the env-var config on the very first run only - from then
+    # on the DB (editable via the /config web form) is the source of truth.
+    cfg = repo.get_config(
+        defaults=Config(
+            letterboxd_username=env_config.LETTERBOXD_USERNAME,
+            zip_code=env_config.ZIP_CODE,
+            hype_list_url=env_config.HYPE_LIST_URL,
+            blacklisted_theaters=env_config.BLACKLISTED_THEATERS,
+        )
+    )
+    logger.info(f"Run starting: username={cfg.letterboxd_username} zip={cfg.zip_code}")
+
     pending = []
     try:
         result = Tracker(repo, LetterboxdClient()).run(
-            config.LETTERBOXD_USERNAME, config.ZIP_CODE, hype_list_url=config.HYPE_LIST_URL
+            cfg.letterboxd_username,
+            cfg.zip_code,
+            hype_list_url=cfg.hype_list_url,
+            blacklisted_theaters=cfg.blacklisted_theaters,
         )
 
         pending = repo.get_unnotified()
@@ -111,6 +128,21 @@ def run_scheduler() -> None:
         logger.info(f"Watchlist added: {f.title} ({f.year})")
     for f in result.removed:
         logger.info(f"Watchlist removed: {f.title} ({f.year})")
+
+
+@app.function(image=image, volumes={"/data": volume}, secrets=[config_ui_secret])
+@modal.asgi_app()
+def config_ui():
+    """The settings form at <app-url>/config/<CONFIG_ACCESS_TOKEN> - see
+    web_app.py. Single-user for now; the access token stands in for a login
+    since there's no account system yet."""
+    import os
+
+    from repository import FilmRepository
+    from web_app import create_app
+
+    repo = FilmRepository.connect(DB_PATH)
+    return create_app(repo, os.environ["CONFIG_ACCESS_TOKEN"], on_saved=volume.commit, on_read=volume.reload)
 
 
 @app.local_entrypoint()

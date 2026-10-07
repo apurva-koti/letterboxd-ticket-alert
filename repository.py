@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import date, datetime, timezone
 
-from domain import FandangoListing, Film, PendingNotification, Tier, TicketStatus, TrackedFilm
+from domain import Config, FandangoListing, Film, PendingNotification, Tier, TicketStatus, TrackedFilm
 
 DB_PATH = "state.db"
 
@@ -47,6 +47,16 @@ CREATE TABLE IF NOT EXISTS ticket_status (
     next_check_at TEXT,
     notified_at TEXT
 );
+
+-- Single row (id=1) for now - see domain.Config's docstring for the
+-- multi-user plan this is step one of.
+CREATE TABLE IF NOT EXISTS config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    letterboxd_username TEXT,
+    zip_code TEXT,
+    hype_list_url TEXT,
+    blacklisted_theaters TEXT
+);
 """
 
 # CREATE TABLE IF NOT EXISTS above only applies to brand-new DBs - an
@@ -75,7 +85,12 @@ class FilmRepository:
 
     @classmethod
     def connect(cls, db_path: str = DB_PATH) -> "FilmRepository":
-        conn = sqlite3.connect(db_path)
+        # check_same_thread=False: the config web form (FastAPI) runs sync
+        # endpoints in a thread pool, not the thread that opened the
+        # connection - safe here since SQLite serializes file access itself
+        # and this is a low-frequency, single-process, non-concurrent-write
+        # workload either way.
+        conn = sqlite3.connect(db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.executescript(SCHEMA)
         for migration in MIGRATIONS:
@@ -295,3 +310,41 @@ class FilmRepository:
     def mark_notified(self, slug: str) -> None:
         self.conn.execute("UPDATE ticket_status SET notified_at = ? WHERE letterboxd_slug = ?", (_now(), slug))
         self.conn.commit()
+
+    def get_config(self, defaults: Config | None = None) -> Config:
+        """Returns the stored config, or `defaults` (seeded on first read)
+        if nothing's been saved yet - so the form shows real values on its
+        very first load instead of blanks."""
+        row = self.conn.execute("SELECT * FROM config WHERE id = 1").fetchone()
+        if row:
+            return Config(
+                letterboxd_username=row["letterboxd_username"],
+                zip_code=row["zip_code"],
+                hype_list_url=row["hype_list_url"],
+                blacklisted_theaters=_parse_theater_list(row["blacklisted_theaters"]),
+            )
+        defaults = defaults or Config(None, None, None, frozenset())
+        self.save_config(defaults)
+        return defaults
+
+    def save_config(self, config: Config) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO config (id, letterboxd_username, zip_code, hype_list_url, blacklisted_theaters)
+            VALUES (1, :username, :zip, :hype, :blacklist)
+            ON CONFLICT(id) DO UPDATE SET
+                letterboxd_username = excluded.letterboxd_username, zip_code = excluded.zip_code,
+                hype_list_url = excluded.hype_list_url, blacklisted_theaters = excluded.blacklisted_theaters
+            """,
+            {
+                "username": config.letterboxd_username,
+                "zip": config.zip_code,
+                "hype": config.hype_list_url,
+                "blacklist": ", ".join(sorted(config.blacklisted_theaters)),
+            },
+        )
+        self.conn.commit()
+
+
+def _parse_theater_list(raw: str | None) -> frozenset[str]:
+    return frozenset(t.strip() for t in (raw or "").split(",") if t.strip())

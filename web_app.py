@@ -1,0 +1,98 @@
+"""A tiny config-editing form, hosted on Modal alongside the scheduler.
+
+Single-user for now: access is gated by a secret URL token (like a
+Letterboxd share link, not a login), since there's no account system yet.
+Comparing an unguessable token is enough for "a few friends," not a real
+auth system - see modal_app.py for the multi-user plan this is step one of.
+"""
+
+from __future__ import annotations
+
+from fastapi import FastAPI, Form, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse
+
+from domain import Config
+from repository import FilmRepository
+
+
+def create_app(
+    repo: FilmRepository, access_token: str, on_saved=lambda: None, on_read=lambda: None
+) -> FastAPI:
+    """`on_saved` runs after every successful save, `on_read` before every
+    page load - on Modal these are the Volume's commit/reload, since this
+    container is long-lived and won't otherwise see a change made by the
+    scheduler's separate container (or vice versa)."""
+    app = FastAPI()
+
+    def _check_token(token: str) -> None:
+        if token != access_token:
+            raise HTTPException(status_code=404)
+
+    @app.get("/config/{token}", response_class=HTMLResponse)
+    def show_form(token: str, saved: bool = False) -> str:
+        _check_token(token)
+        on_read()
+        return _render_form(token, repo.get_config(), saved)
+
+    @app.post("/config/{token}")
+    def save_form(
+        token: str,
+        letterboxd_username: str = Form(...),
+        zip_code: str = Form(...),
+        hype_list_url: str = Form(""),
+        blacklisted_theaters: str = Form(""),
+    ) -> RedirectResponse:
+        _check_token(token)
+        repo.save_config(
+            Config(
+                letterboxd_username=letterboxd_username.strip(),
+                zip_code=zip_code.strip(),
+                hype_list_url=hype_list_url.strip() or None,
+                blacklisted_theaters=frozenset(t.strip() for t in blacklisted_theaters.split(",") if t.strip()),
+            )
+        )
+        on_saved()
+        return RedirectResponse(url=f"/config/{token}?saved=1", status_code=303)
+
+    return app
+
+
+def _render_form(token: str, config: Config, saved: bool) -> str:
+    banner = '<p class="saved">Saved.</p>' if saved else ""
+    blacklist_text = ", ".join(sorted(config.blacklisted_theaters))
+    return f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Ticket alert settings</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; max-width: 480px; margin: 3rem auto; color: #222; }}
+  label {{ display: block; margin-top: 1.2rem; font-weight: 600; }}
+  input, textarea {{ width: 100%; padding: 0.5rem; margin-top: 0.3rem; font-size: 1rem; box-sizing: border-box; }}
+  .hint {{ color: #666; font-size: 0.85rem; margin-top: 0.2rem; }}
+  button {{ margin-top: 1.5rem; padding: 0.6rem 1.2rem; font-size: 1rem; cursor: pointer; }}
+  .saved {{ color: #1a7f37; font-weight: 600; }}
+</style>
+</head>
+<body>
+<h1>Ticket alert settings</h1>
+{banner}
+<form method="post" action="/config/{token}">
+  <label>Letterboxd username</label>
+  <input name="letterboxd_username" value="{config.letterboxd_username or ''}" required>
+
+  <label>Zip code</label>
+  <input name="zip_code" value="{config.zip_code or ''}" required>
+
+  <label>Hype list URL</label>
+  <input name="hype_list_url" value="{config.hype_list_url or ''}">
+  <div class="hint">Optional. Films on this list are checked every run and alert on any theater.</div>
+
+  <label>Blacklisted theaters</label>
+  <textarea name="blacklisted_theaters" rows="3">{blacklist_text}</textarea>
+  <div class="hint">Comma-separated, matching Fandango's theater names exactly (e.g. "AMC Mercado 20, Cinemark Century San Mateo 12"). A showing only at these theaters won't alert you.</div>
+
+  <button type="submit">Save</button>
+</form>
+</body>
+</html>"""

@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from domain import Tier, TicketStatus
+from domain import Config, Tier, TicketStatus
 from repository import FilmRepository
 
 from conftest import make_film, make_listing
@@ -8,6 +8,25 @@ from conftest import make_film, make_listing
 
 def repo():
     return FilmRepository.connect(":memory:")
+
+
+def test_get_config_seeds_from_defaults_on_first_read():
+    r = repo()
+    defaults = Config(letterboxd_username="dave", zip_code="94158", hype_list_url=None, blacklisted_theaters=frozenset())
+    assert r.get_config(defaults) == defaults
+    assert r.get_config() == defaults  # seeded - a second read needs no defaults
+
+
+def test_save_config_round_trips_blacklisted_theaters():
+    r = repo()
+    config = Config(
+        letterboxd_username="dave",
+        zip_code="94158",
+        hype_list_url="https://letterboxd.com/dave/list/hype/",
+        blacklisted_theaters=frozenset({"AMC Mercado 20", "Cinemark Century San Mateo 12"}),
+    )
+    r.save_config(config)
+    assert r.get_config() == config
 
 
 def test_sync_watchlist_reports_added_and_removed():

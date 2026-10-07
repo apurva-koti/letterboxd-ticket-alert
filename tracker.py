@@ -56,7 +56,13 @@ class Tracker:
         self.repo = repo
         self.letterboxd = letterboxd
 
-    def run(self, username: str, zip_code: str, hype_list_url: str | None = None) -> RunResult:
+    def run(
+        self,
+        username: str,
+        zip_code: str,
+        hype_list_url: str | None = None,
+        blacklisted_theaters: frozenset[str] = frozenset(),
+    ) -> RunResult:
         result = RunResult()
         now = datetime.now(timezone.utc)
 
@@ -91,7 +97,7 @@ class Tracker:
 
             time.sleep(REQUEST_DELAY_SECONDS)
             try:
-                self._process_film(fandango, film, tracked, is_hype, zip_code, now, result)
+                self._process_film(fandango, film, tracked, is_hype, zip_code, blacklisted_theaters, now, result)
             except Exception:
                 logger.warning(f"{film.title} ({film.year}): check failed, will retry next run", exc_info=True)
 
@@ -104,6 +110,7 @@ class Tracker:
         tracked: TrackedFilm,
         is_hype: bool,
         zip_code: str,
+        blacklisted_theaters: frozenset[str],
         now: datetime,
         result: RunResult,
     ) -> None:
@@ -121,7 +128,19 @@ class Tracker:
             anchor, director, runtime, poster_url, tier = refreshed
 
         self._check_fandango(
-            fandango, film, director, runtime, poster_url, tracked.status, tier, anchor, today, zip_code, now, result
+            fandango,
+            film,
+            director,
+            runtime,
+            poster_url,
+            tracked.status,
+            tier,
+            anchor,
+            today,
+            zip_code,
+            blacklisted_theaters,
+            now,
+            result,
         )
 
     def _refresh_from_letterboxd(
@@ -153,6 +172,7 @@ class Tracker:
         anchor: date | None,
         today: date,
         zip_code: str,
+        blacklisted_theaters: frozenset[str],
         now: datetime,
         result: RunResult,
     ) -> None:
@@ -173,9 +193,16 @@ class Tracker:
             if active is None or check.status == TicketStatus.ON_SALE:
                 active = c
 
-        if on_sale:
+        # A showing only at a blacklisted theater is treated as if it were
+        # never on sale at all - not just "don't email about it" - so the
+        # status itself stays clear of ON_SALE and a real alert still fires
+        # the moment it reaches anywhere else, instead of being suppressed
+        # forever because the status already flipped once.
+        alertable_on_sale = on_sale - blacklisted_theaters
+        alertable_showtimes_only = showtimes_only - blacklisted_theaters
+        if alertable_on_sale:
             new_status = TicketStatus.ON_SALE
-        elif showtimes_only:
+        elif alertable_showtimes_only:
             new_status = TicketStatus.SHOWTIMES_ANNOUNCED
         else:
             new_status = TicketStatus.NONE
