@@ -142,7 +142,12 @@ def config_ui():
     from web_app import create_app
 
     repo = FilmRepository.connect(DB_PATH)
-    return create_app(repo, os.environ["CONFIG_ACCESS_TOKEN"], on_saved=volume.commit, on_read=volume.reload)
+    # Not on_read=volume.reload: the connection opened above keeps state.db
+    # open for this container's lifetime, and reload() refuses to run while
+    # any file on the volume is open (confirmed in production - 500s every
+    # request). Not needed for correctness anyway - the scheduler opens its
+    # own fresh connection every run and always sees the latest commit.
+    return create_app(repo, os.environ["CONFIG_ACCESS_TOKEN"], on_saved=volume.commit)
 
 
 @app.local_entrypoint()

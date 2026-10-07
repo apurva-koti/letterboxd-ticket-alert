@@ -18,10 +18,14 @@ from repository import FilmRepository
 def create_app(
     repo: FilmRepository, access_token: str, on_saved=lambda: None, on_read=lambda: None
 ) -> FastAPI:
-    """`on_saved` runs after every successful save, `on_read` before every
-    page load - on Modal these are the Volume's commit/reload, since this
-    container is long-lived and won't otherwise see a change made by the
-    scheduler's separate container (or vice versa)."""
+    """`on_saved` runs after every successful save - on Modal, this commits
+    the Volume so the write is durable and visible to the scheduler's
+    separate container. `on_read` is a hook for the equivalent on page
+    load (picking up a change from elsewhere), left as a no-op by default:
+    Modal's Volume.reload() refuses to run while this container's own
+    sqlite connection holds state.db open, and it isn't needed for
+    correctness here anyway since the scheduler always opens its own fresh
+    connection and sees the latest commit regardless."""
     app = FastAPI()
 
     def _check_token(token: str) -> None:

@@ -53,10 +53,11 @@ def test_saving_blank_hype_list_clears_it_not_empty_string():
     assert repo.get_config().hype_list_url is None
 
 
-def test_save_commits_and_read_reloads_the_volume():
-    """On Modal these hooks are the Volume's commit/reload - a long-lived
-    container otherwise wouldn't see a change from a different one (the
-    scheduler), or vice versa."""
+def test_save_and_read_hooks_fire():
+    """on_saved is wired to the Volume's commit on Modal, so a write is
+    durable and visible to the scheduler's separate container. on_read is
+    a no-op there in practice (see web_app.create_app's docstring) but
+    stays a generic hook here."""
     reads, saves = [], []
     client, _ = _client(on_saved=lambda: saves.append(1), on_read=lambda: reads.append(1))
 
