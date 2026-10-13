@@ -114,16 +114,30 @@ def test_find_candidates_rejects_a_clearly_shorter_runtime_when_director_is_miss
     assert candidates == []
 
 
-def test_find_candidates_never_rejects_a_longer_runtime_when_director_is_missing():
-    """Moonlight-style: a re-release event's listed runtime can run well
+def test_find_candidates_tolerates_a_modestly_longer_runtime_when_director_is_missing():
+    """Moonlight-style: a re-release event's listed runtime can run a bit
     past the film's own runtime because it bundles in an intro or
-    retrospective featurette - a re-release adds to the runtime, it never
-    cuts the film, so a longer candidate is never treated as suspicious."""
+    retrospective featurette - a re-release adds to the runtime, it
+    doesn't cut the film, so a modest overrun isn't treated as suspicious."""
     listings = [make_listing(fandango_id="1", slug="moonlight-anniversary", title="Moonlight", year=2026)]
     client = FakeClient(listings, runtimes={"moonlight-anniversary": 129})
 
     candidates = matcher.find_candidates(client, "Moonlight", "Barry Jenkins", runtime=112)
     assert [c.slug for c in candidates] == ["moonlight-anniversary"]
+
+
+def test_find_candidates_rejects_a_wildly_longer_runtime_when_director_is_missing():
+    """Regression test for a real false match: "Metropolis" (1927, dir.
+    Fritz Lang, 148 min) matched "The Metropolitan Opera: Macbeth" (2026,
+    197 min) on title similarity alone - no director data, and the old
+    runtime check only ever rejected a SHORTER candidate, so a 49-minute
+    gap (a completely different production, not a bonus featurette)
+    sailed through unchecked."""
+    listings = [make_listing(fandango_id="1", slug="met-opera-macbeth", title="The Metropolitan Opera: Macbeth", year=2026)]
+    client = FakeClient(listings, runtimes={"met-opera-macbeth": 197})
+
+    candidates = matcher.find_candidates(client, "Metropolis", "Fritz Lang", runtime=148, year=1927)
+    assert candidates == []
 
 
 def test_find_candidates_falls_through_to_synopsis_when_director_is_missing():
