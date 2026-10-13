@@ -140,6 +140,21 @@ def test_find_candidates_rejects_a_wildly_longer_runtime_when_director_is_missin
     assert candidates == []
 
 
+def test_find_candidates_requires_the_title_to_actually_contain_the_real_title():
+    """Title containment is independent of every other signal, not
+    redundant with the runtime check above - this listing's runtime is
+    close enough to pass, and it would still be a false match if title
+    similarity alone (0.450, same mechanism as the real bug) were all
+    that gated it. "Metropolis" never appears anywhere in "The
+    Metropolitan Opera: Macbeth," despite the two sharing enough
+    characters ("Metropoli...") to clear a low fuzzy-similarity floor."""
+    listings = [make_listing(fandango_id="1", slug="met-opera-macbeth", title="The Metropolitan Opera: Macbeth", year=2026)]
+    client = FakeClient(listings, runtimes={"met-opera-macbeth": 150})  # close enough to pass the runtime check alone
+
+    candidates = matcher.find_candidates(client, "Metropolis", "Fritz Lang", runtime=148, year=1927)
+    assert candidates == []
+
+
 def test_find_candidates_falls_through_to_synopsis_when_director_is_missing():
     """Event listings with no director metadata often describe the event
     in prose instead - confirmed in production: Moonlight's real

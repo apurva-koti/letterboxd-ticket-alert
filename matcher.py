@@ -18,6 +18,18 @@ would risk reopening the exact false match "Casino Royale" made against
 showtimes by the caller - no single property of a listing reliably picks
 one "best" match in advance.
 
+Before any of that, the candidate's title has to actually CONTAIN the
+real title as a substring, once normalized - not just score high enough
+on fuzzy similarity. A re-release's title only ever adds words around the
+original ("Moonlight" -> "Moonlight 10th Anniversary Remastered"), it
+never replaces them, so requiring literal containment costs nothing for a
+real match. It's not redundant with the fuzzy floor below: two titles can
+share enough characters to clear a low fuzzy threshold while one doesn't
+contain the other at all (confirmed in production: "The Metropolitan
+Opera: Macbeth" scored 0.450 against "Metropolis" - higher than
+Moonlight's real anniversary listing's own 0.391 - purely from the shared
+"Metropoli" prefix, even though "Metropolis" never appears in that title).
+
 Runtime is checked with a tight lower bound and a much looser upper one: a
 candidate noticeably SHORTER than the original is suspicious, but a bit
 longer is expected and tolerated - a re-release event adds an intro or
@@ -25,13 +37,11 @@ retrospective featurette, it doesn't cut the film (confirmed in
 production: Moonlight's real 10th-anniversary listing runs 17 minutes
 longer than the film itself, and its own synopsis explains why - "...an
 exclusive conversation with director Barry Jenkins ... to follow the
-feature"). But "longer" still has a ceiling - a candidate's title can be
-textually similar enough to clear the title floor while being a
-completely different production with no real relationship at all
-(confirmed in production: an unrelated 197-minute Metropolitan Opera
-broadcast matched "Metropolis" (1927, 148 min) on title alone - "The
-Metropolitan Opera: Macbeth" shares enough characters with "Metropolis" to
-pass, and a 49-minute gap is far beyond any plausible bonus featurette).
+feature"). "Longer" still has a ceiling too, independent of the title
+containment check above - two listings can genuinely share a title (a
+real double-feature booking pairing the right film with an unrelated one)
+while being a completely different runtime, like the real American
+Psycho/Memento combo booking this project has run into.
 """
 
 from __future__ import annotations
@@ -53,9 +63,15 @@ RUNTIME_LONGER_TOLERANCE_MINUTES = 30
 def find_candidates(
     client: FandangoClient, title: str, director: str | None, runtime: int | None = None, year: int | None = None
 ) -> list[FandangoListing]:
-    plausible = [c for c in client.search(title) if _similarity(title, c.title) >= MIN_TITLE_SCORE]
+    plausible = [
+        c for c in client.search(title) if _title_contains(title, c.title) and _similarity(title, c.title) >= MIN_TITLE_SCORE
+    ]
     plausible = [c for c in plausible if not _year_too_early(year, c.year)]
     return [c for c in plausible if _is_match(client, c, title, director, runtime)]
+
+
+def _title_contains(title: str, candidate_title: str) -> bool:
+    return _normalize(title) in _normalize(candidate_title)
 
 
 def _year_too_early(target_year: int | None, candidate_year: int | None) -> bool:
