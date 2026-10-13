@@ -30,18 +30,13 @@ Opera: Macbeth" scored 0.450 against "Metropolis" - higher than
 Moonlight's real anniversary listing's own 0.391 - purely from the shared
 "Metropoli" prefix, even though "Metropolis" never appears in that title).
 
-Runtime is checked with a tight lower bound and a much looser upper one: a
-candidate noticeably SHORTER than the original is suspicious, but a bit
-longer is expected and tolerated - a re-release event adds an intro or
-retrospective featurette, it doesn't cut the film (confirmed in
-production: Moonlight's real 10th-anniversary listing runs 17 minutes
-longer than the film itself, and its own synopsis explains why - "...an
-exclusive conversation with director Barry Jenkins ... to follow the
-feature"). "Longer" still has a ceiling too, independent of the title
-containment check above - two listings can genuinely share a title (a
-real double-feature booking pairing the right film with an unrelated one)
-while being a completely different runtime, like the real American
-Psycho/Memento combo booking this project has run into.
+Runtime is checked one-sided: a candidate noticeably SHORTER than the
+original is suspicious, but longer is expected and never penalized - a
+re-release event adds an intro or retrospective featurette, it doesn't cut
+the film (confirmed in production: Moonlight's real 10th-anniversary
+listing runs 17 minutes longer than the film itself, and its own synopsis
+explains why - "...an exclusive conversation with director Barry Jenkins
+... to follow the feature").
 """
 
 from __future__ import annotations
@@ -57,7 +52,6 @@ MIN_TITLE_SCORE = 0.3
 TITLE_ONLY_MATCH_THRESHOLD = 0.85
 DIRECTOR_MATCH_THRESHOLD = 0.6
 RUNTIME_SHORTER_TOLERANCE_MINUTES = 5
-RUNTIME_LONGER_TOLERANCE_MINUTES = 30
 
 
 def find_candidates(
@@ -96,7 +90,7 @@ def _is_match(client: FandangoClient, c: FandangoListing, title: str, director: 
     if director and synopsis and _mentions_director(synopsis, director):
         return True
     if runtime and c.runtime:
-        return not _runtime_contradicts(runtime, c.runtime)
+        return not _runtime_too_short(runtime, c.runtime)
     return _similarity(title, c.title) >= TITLE_ONLY_MATCH_THRESHOLD
 
 
@@ -112,8 +106,8 @@ def _mentions_director(synopsis: str, director: str) -> bool:
     return surname_tokens[-1] in _normalize(synopsis)
 
 
-def _runtime_contradicts(target: int, candidate: int) -> bool:
-    return candidate < target - RUNTIME_SHORTER_TOLERANCE_MINUTES or candidate > target + RUNTIME_LONGER_TOLERANCE_MINUTES
+def _runtime_too_short(target: int, candidate: int) -> bool:
+    return candidate < target - RUNTIME_SHORTER_TOLERANCE_MINUTES
 
 
 def _directors_match(a: str, b: str) -> bool:
