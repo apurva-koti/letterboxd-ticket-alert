@@ -1,5 +1,6 @@
 from datetime import date
 
+import pytest
 import requests
 
 import fandango_client as fc
@@ -58,6 +59,22 @@ def test_get_retries_on_blocked_response(monkeypatch):
 
     resp = client._get("https://example.test/x")
     assert resp.text == "ok"
+
+
+def test_get_raises_when_every_retry_stays_blocked(monkeypatch):
+    """Regression test for a real production incident: Misty Green's
+    tickets were never actually gone, but a persistently-blocked response
+    silently became an empty showtime list (a bare except-ValueError
+    catch, indistinguishable from "genuinely nothing on sale"), flipping
+    status to NONE for one check and triggering a real but duplicate
+    alert when it correctly read ON_SALE again on the next one. _get must
+    raise instead of handing back a block page as if it were a normal
+    200."""
+    monkeypatch.setattr(fc.time, "sleep", lambda s: None)
+    client = _client_with_fake_session(lambda url, **kw: FakeResponse(text=""))
+
+    with pytest.raises(requests.exceptions.RequestException):
+        client._get("https://example.test/x")
 
 
 def test_get_retries_connection_exception(monkeypatch):
