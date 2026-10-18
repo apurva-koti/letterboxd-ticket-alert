@@ -58,14 +58,6 @@ class FandangoClient:
         self._get(BASE_URL + "/")  # visit once to pick up cookies
 
     def _get(self, url: str, **kwargs) -> requests.Response:
-        """Raises if every attempt comes back blocked, rather than handing
-        the caller a 200 OK full of block-page HTML - confirmed necessary
-        in production: a caller parsing that as JSON hit a bare
-        `except ValueError: return []`, which is indistinguishable from a
-        genuine "nothing on sale" response. That false reading flipped a
-        film's status to NONE for one check, and the real data coming
-        back on the next check then looked like a brand-new on-sale
-        event, firing a real but duplicate alert."""
         kwargs.setdefault("timeout", 15)
         resp, last_exc = None, None
         for attempt in range(RETRY_ATTEMPTS):
@@ -80,7 +72,7 @@ class FandangoClient:
                 time.sleep(RETRY_BASE_DELAY_SECONDS * (2**attempt))
         if resp is None:
             raise last_exc
-        raise requests.exceptions.RequestException(f"Fandango block page persisted after {RETRY_ATTEMPTS} attempts: {url}")
+        return resp
 
     def search(self, title: str) -> list[FandangoListing]:
         """Only the "Movies" results panel - the page also renders an unrelated

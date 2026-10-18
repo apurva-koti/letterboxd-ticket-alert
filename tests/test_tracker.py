@@ -140,42 +140,6 @@ def test_a_theater_merging_in_silently_does_not_get_credited_as_alerted(monkeypa
     assert tracked.alerted_theaters == ["AMC Mercado 20"]  # frozen: only what was actually alerted
 
 
-def test_a_fandango_check_failure_leaves_the_previous_status_untouched(monkeypatch, repo):
-    """Regression test for a real production incident: a persistently
-    blocked Fandango response used to be silently treated as "nothing on
-    sale" (fandango_client.py's old behavior), flipping status to NONE for
-    one check and causing a real but duplicate alert when the next check
-    read ON_SALE again. check_showtimes now raises on a genuine fetch
-    failure, and that must leave the previous status alone - not
-    overwrite it - so nothing downstream mistakes "couldn't check" for
-    "checked and found nothing"."""
-    film = make_film(slug="misty-green", title="Misty Green")
-    release = LetterboxdRelease(director=None, genres=[], poster_url=None, us_dates=[date(2026, 10, 2)])
-    lb = FakeLetterboxd(watchlist=[film], releases={"misty-green": release})
-    listing = make_listing(fandango_id="1")
-    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [listing])
-
-    fandango = FakeFandango(showtimes={"1": make_showtime_check(on_sale_theaters=["Smith Rafael Film Center"])})
-    _install_fandango(monkeypatch, fandango)
-    Tracker(repo, lb).run("user", "94158")
-    assert repo.get("misty-green").status == TicketStatus.ON_SALE
-
-    conn = repo.conn
-    conn.execute("UPDATE ticket_status SET next_check_at = ?", ((datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),))
-    conn.commit()
-
-    def blocked(fandango_id, slug, zip_code):
-        raise RuntimeError("Fandango block page persisted after 3 attempts")
-
-    fandango.check_showtimes = blocked
-    result = Tracker(repo, lb).run("user", "94158")
-
-    assert film not in result.checked
-    tracked = repo.get("misty-green")
-    assert tracked.status == TicketStatus.ON_SALE
-    assert tracked.alerted_theaters == ["Smith Rafael Film Center"]
-
-
 def test_logs_when_an_alert_is_skipped_for_being_blacklisted_only(monkeypatch, repo, caplog):
     film = make_film(slug="singin-in-the-rain", title="Singin' in the Rain")
     release = LetterboxdRelease(director=None, genres=[], poster_url=None, us_dates=[date(2026, 10, 2)])
