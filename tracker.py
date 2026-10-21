@@ -17,7 +17,6 @@ logger = logging.getLogger("letterboxd-ticket-alert")
 
 MAX_PROCESSED_PER_RUN = 20
 REQUEST_DELAY_SECONDS = 0.3
-DOCUMENTARY_GENRE = "documentary"
 
 TIER_MEANINGS = {
     Tier.MUST_WATCH: "must-watch, checked every run",
@@ -122,10 +121,7 @@ class Tracker:
         tier = compute_tier(anchor, today, is_hype)
 
         if tier in (Tier.UNKNOWN, Tier.RETIRED) or is_hype:
-            refreshed = self._refresh_from_letterboxd(film, is_hype, now)
-            if refreshed is None:
-                return  # excluded as documentary - already saved + logged
-            anchor, director, runtime, poster_url, tier = refreshed
+            anchor, director, runtime, poster_url, tier = self._refresh_from_letterboxd(film, is_hype, now)
 
         self._check_fandango(
             fandango,
@@ -145,17 +141,10 @@ class Tracker:
 
     def _refresh_from_letterboxd(
         self, film: Film, is_hype: bool, now: datetime
-    ) -> tuple[date | None, str | None, int | None, str | None, Tier] | None:
-        """Returns (anchor, director, runtime, poster_url, tier), or None if
-        the film was excluded (saved + logged already)."""
+    ) -> tuple[date | None, str | None, int | None, str | None, Tier]:
+        """Returns (anchor, director, runtime, poster_url, tier)."""
         today = now.date()
         release = self.letterboxd.fetch_release(film.slug)
-
-        if DOCUMENTARY_GENRE in release.genres and not is_hype:
-            self.repo.save_match(film.slug, None, None, excluded_reason=DOCUMENTARY_GENRE)
-            logger.info(f"{film.title} ({film.year}): excluded, documentary")
-            return None
-
         anchor = pick_anchor(release.us_dates, today)
         tier = compute_tier(anchor, today, is_hype)
         return anchor, release.director, release.runtime, release.poster_url, tier

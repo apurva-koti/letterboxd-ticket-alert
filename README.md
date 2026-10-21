@@ -96,8 +96,8 @@ once a real theater comes through.
 A Letterboxd list (any name) for films you want checked aggressively -
 every single run - instead of waiting on the normal schedule below. Use it
 for anything whose tickets might go on sale with almost no notice. Films on
-it are tracked even if they're not on your watchlist, Letterboxd has no
-confirmed date yet, or they're a documentary (normally skipped).
+it are tracked even if they're not on your watchlist or Letterboxd has no
+confirmed date yet.
 
 Can be a private list - use its share link as the Hype list URL. Only the
 first page (~28 films) of a private list is reachable, so keep it small.

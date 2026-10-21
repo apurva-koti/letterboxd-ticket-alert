@@ -157,23 +157,27 @@ def test_logs_when_an_alert_is_skipped_for_being_blacklisted_only(monkeypatch, r
     assert "on sale only at blacklisted theater(s), skipping: The New Parkway" in caplog.text
 
 
-def test_documentary_is_excluded_and_never_matched(monkeypatch, repo):
-    film = make_film(slug="nuisance-bear")
-    release = LetterboxdRelease(director="A Director", genres=["documentary"], poster_url=None, us_dates=[date(2026, 1, 1)])
-    lb = FakeLetterboxd(watchlist=[film], releases={"nuisance-bear": release})
-    called = []
+def test_documentaries_are_matched_and_checked_like_any_other_film(monkeypatch, repo):
+    """Regression test: documentaries used to be excluded outright on
+    sync, with no ticket_status row ever created for them - a real
+    documentary (Naza) was genuinely on sale at 5 real theaters for weeks
+    and never got checked at all because of this. Documentaries now go
+    through the exact same matching and checking as everything else."""
+    film = make_film(slug="naza", title="Naza")
+    release = LetterboxdRelease(director="A Director", genres=["documentary", "war"], poster_url=None, us_dates=[date(2026, 1, 1)])
+    lb = FakeLetterboxd(watchlist=[film], releases={"naza": release})
+    listing = make_listing(fandango_id="1")
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [listing])
 
-    def fake_find_candidates(*a, **k):
-        called.append(1)
-        return []
+    fandango = FakeFandango(showtimes={"1": make_showtime_check(status=TicketStatus.ON_SALE)})
+    _install_fandango(monkeypatch, fandango)
 
-    monkeypatch.setattr(matcher, "find_candidates", fake_find_candidates)
-    _install_fandango(monkeypatch, FakeFandango())
+    result = Tracker(repo, lb).run("user", "94158")
 
-    Tracker(repo, lb).run("user", "94158")
-
-    assert called == []
-    assert repo.get("nuisance-bear").excluded_reason == "documentary"
+    assert film in result.alerted
+    tracked = repo.get("naza")
+    assert tracked.excluded_reason is None
+    assert tracked.status == TicketStatus.ON_SALE
 
 
 def test_unmatched_film_is_rescheduled_not_starved(monkeypatch, repo):
