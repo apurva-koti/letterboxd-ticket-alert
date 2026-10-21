@@ -117,3 +117,52 @@ def test_check_showtimes_returns_none_when_calendar_is_empty(monkeypatch):
     monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code: [])
 
     assert client.check_showtimes("123", "some-slug", "94158") is None
+
+
+def test_movie_calendar_logs_on_parse_failure(caplog):
+    """A JSON parse failure here is indistinguishable from a genuinely
+    empty calendar to every caller - logged so the two can finally be
+    told apart after the fact."""
+    client = _client_with_stubbed_get(lambda url, **kw: FakeResponse(text="not json", status_code=200))
+    with caplog.at_level("WARNING"):
+        result = client._movie_calendar("misty-green-2026-247569", "94158")
+
+    assert result == []
+    assert "didn't parse as JSON" in caplog.text
+    assert "misty-green-2026-247569" in caplog.text
+
+
+def test_showtime_grouping_logs_on_parse_failure(caplog):
+    client = _client_with_stubbed_get(lambda url, **kw: FakeResponse(text="not json", status_code=200))
+    with caplog.at_level("WARNING"):
+        result = client._showtime_grouping("123", "94158", date(2026, 10, 30), "referer")
+
+    assert result is None
+    assert "didn't parse as JSON" in caplog.text
+
+
+def test_check_showtimes_logs_when_calendar_has_dates_but_nothing_found(monkeypatch, caplog):
+    """Distinguishes "no calendar dates at all" from "had dates, but every
+    per-date lookup came back empty" - the second case is the one with no
+    redundancy left to fall back on for a film with only a date or two."""
+    client = _client_with_stubbed_get(lambda url, **kw: FakeResponse(text="ok"))
+    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code: [date(2026, 10, 30)])
+    monkeypatch.setattr(client, "_showtime_grouping", lambda *a, **k: None)
+
+    with caplog.at_level("WARNING"):
+        result = client.check_showtimes("123", "misty-green-2026-247569", "94158")
+
+    assert result is None
+    assert "every theaterShowtimeGroupings lookup came back empty" in caplog.text
+
+
+def test_get_logs_each_blocked_attempt_and_the_final_fallback(monkeypatch, caplog):
+    monkeypatch.setattr(fc.time, "sleep", lambda s: None)
+    client = _client_with_fake_session(lambda url, **kw: FakeResponse(text=""))
+
+    with caplog.at_level("WARNING"):
+        resp = client._get("https://example.test/x")
+
+    assert resp.text == ""
+    assert caplog.text.count("looks blocked") == fc.RETRY_ATTEMPTS
+    assert "still blocked after" in caplog.text

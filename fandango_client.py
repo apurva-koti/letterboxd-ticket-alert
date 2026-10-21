@@ -10,6 +10,7 @@ login needed, just a same-session-looking request. Fandango's own
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from datetime import date
@@ -18,6 +19,8 @@ import requests
 from bs4 import BeautifulSoup
 
 from domain import FandangoListing, ShowtimeCheck, TicketStatus
+
+logger = logging.getLogger("letterboxd-ticket-alert")
 
 BASE_URL = "https://www.fandango.com"
 HEADERS = {
@@ -34,9 +37,17 @@ TITLE_YEAR_RE = re.compile(r"^(.*)\s\((\d{4})\)$")
 BLOCK_PAGE_MARKER = "A Message To Our Fans"
 RETRY_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECONDS = 1.5
+SNIPPET_LENGTH = 200
 
 def _looks_blocked(resp: requests.Response) -> bool:
     return BLOCK_PAGE_MARKER in resp.text or not resp.text.strip()
+
+
+def _snippet(resp: requests.Response | None) -> str:
+    if resp is None:
+        return "<no response>"
+    body = resp.text.strip().replace("\n", " ")
+    return f"status={resp.status_code} body={body[:SNIPPET_LENGTH]!r}"
 
 
 def _extract_movie_json_ld(html: str) -> dict | None:
@@ -66,12 +77,16 @@ class FandangoClient:
                 last_exc = None
             except requests.exceptions.RequestException as e:
                 last_exc, resp = e, None
+                logger.warning(f"Fandango request exception (attempt {attempt + 1}/{RETRY_ATTEMPTS}) {url}: {e!r}")
             if resp is not None and not _looks_blocked(resp):
                 return resp
+            if resp is not None:
+                logger.warning(f"Fandango response looks blocked (attempt {attempt + 1}/{RETRY_ATTEMPTS}) {url}: {_snippet(resp)}")
             if attempt < RETRY_ATTEMPTS - 1:
                 time.sleep(RETRY_BASE_DELAY_SECONDS * (2**attempt))
         if resp is None:
             raise last_exc
+        logger.warning(f"Fandango still blocked after {RETRY_ATTEMPTS} attempts, returning it anyway: {url}: {_snippet(resp)}")
         return resp
 
     def search(self, title: str) -> list[FandangoListing]:
@@ -130,7 +145,8 @@ class FandangoClient:
         (confirmed missed in production: a one-off limited engagement three
         weeks past a film's main release)."""
         referer = f"{BASE_URL}/{slug}/movie-overview"
-        for check_date in self._movie_calendar(slug, zip_code):
+        calendar_dates = self._movie_calendar(slug, zip_code)
+        for check_date in calendar_dates:
             data = self._showtime_grouping(fandango_id, zip_code, check_date, referer)
             if not data:
                 continue
@@ -157,6 +173,11 @@ class FandangoClient:
                     on_sale_theaters=sorted(on_sale),
                     showtimes_only_theaters=sorted(showtimes_only),
                 )
+        if calendar_dates:
+            logger.warning(
+                f"check_showtimes for {slug} ({fandango_id}): calendar had {len(calendar_dates)} date(s) "
+                f"({calendar_dates}) but every theaterShowtimeGroupings lookup came back empty"
+            )
         return None
 
     def _movie_calendar(self, slug: str, zip_code: str) -> list[date]:
@@ -169,6 +190,10 @@ class FandangoClient:
         try:
             data = resp.json()
         except ValueError:
+            # Indistinguishable from "genuinely no dates" to every caller -
+            # logged so a real failure here can finally be told apart from
+            # that, instead of silently reading as "nothing on sale."
+            logger.warning(f"movieCalendar for {slug} didn't parse as JSON: {_snippet(resp)}")
             return []
         dates = (data.get("movieCalendar") or {}).get("showtimeDates") or []
         return [date.fromisoformat(d) for d in dates]
@@ -184,5 +209,6 @@ class FandangoClient:
         try:
             data = resp.json()
         except ValueError:
+            logger.warning(f"theaterShowtimeGroupings for {fandango_id} on {check_date} didn't parse as JSON: {_snippet(resp)}")
             return None
         return data if data.get("hasShowtimes") else None

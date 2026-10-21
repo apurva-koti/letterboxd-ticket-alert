@@ -2,6 +2,7 @@
 captures from actual fandango.com / letterboxd.com pages, not hand-written
 approximations."""
 
+import json
 from datetime import date
 from pathlib import Path
 
@@ -60,7 +61,14 @@ class FakeResponse:
             raise requests.HTTPError(f"status {self.status_code}")
 
     def json(self):
-        return self._json
+        """Matches the real requests.Response contract: given explicit
+        json_data, return it; otherwise actually parse .text, raising
+        ValueError on invalid JSON like the real thing would - needed to
+        simulate a response that looks like JSON was expected but wasn't
+        (e.g. an HTML block page)."""
+        if self._json is not None:
+            return self._json
+        return json.loads(self.text)
 
 
 def fake_html_response(fixture_name, status_code=200):
