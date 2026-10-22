@@ -87,10 +87,12 @@ class Tracker:
             assert tracked is not None  # just came from all_films()
 
             if tracked.excluded_reason and not is_hype:
+                logger.info(f"[skip] {film.title}: excluded ({tracked.excluded_reason})")
                 continue
             if not is_due(tracked.next_check_at, now):
                 continue
             if not is_hype and processed >= MAX_PROCESSED_PER_RUN:
+                logger.info(f"[skip] {film.title}: due, but over the {MAX_PROCESSED_PER_RUN}-per-run cap")
                 continue
             processed += 1
 
@@ -176,7 +178,12 @@ class Tracker:
         for c in candidates:
             check = fandango.check_showtimes(c.fandango_id, c.slug, zip_code)
             if not check:
+                logger.info(f"[check] {film.title}: candidate {c.slug} -> no showtimes")
                 continue
+            logger.info(
+                f"[check] {film.title}: candidate {c.slug} -> {check.status} on {check.checked_date}, "
+                f"on_sale={check.on_sale_theaters} showtimes_only={check.showtimes_only_theaters}"
+            )
             on_sale.update(check.on_sale_theaters)
             showtimes_only.update(check.showtimes_only_theaters)
             if active is None or check.status == TicketStatus.ON_SALE:
@@ -189,6 +196,10 @@ class Tracker:
         # forever because the status already flipped once.
         alertable_on_sale = on_sale - blacklisted_theaters
         alertable_showtimes_only = showtimes_only - blacklisted_theaters
+        logger.info(
+            f"[check] {film.title}: aggregate on_sale={sorted(on_sale)} showtimes_only={sorted(showtimes_only)}, "
+            f"after blacklist on_sale={sorted(alertable_on_sale)} showtimes_only={sorted(alertable_showtimes_only)}"
+        )
         if alertable_on_sale:
             new_status = TicketStatus.ON_SALE
         elif alertable_showtimes_only:

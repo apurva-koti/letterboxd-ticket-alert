@@ -146,27 +146,37 @@ class FandangoClient:
         weeks past a film's main release)."""
         referer = f"{BASE_URL}/{slug}/movie-overview"
         calendar_dates = self._movie_calendar(slug, zip_code)
+        logger.info(f"[showtimes] {slug}: calendar has {len(calendar_dates)} date(s): {[d.isoformat() for d in calendar_dates]}")
         for check_date in calendar_dates:
             data = self._showtime_grouping(fandango_id, zip_code, check_date, referer)
             if not data:
+                logger.info(f"[showtimes] {slug} {check_date}: no showtime data")
                 continue
 
             on_sale, showtimes_only = set(), set()
             for theater in data["theaterShowtimes"].get("theaters", []):
                 is_on_sale, has_showtimes = False, False
+                type_counts: dict[str, int] = {}
                 for variant in theater.get("variants", []):
                     for group in variant.get("amenityGroups", []):
                         for showtime in group.get("showtimes", []):
                             has_showtimes = True
+                            kind = "soldOut" if showtime.get("isSoldOut") else str(showtime.get("type"))
+                            type_counts[kind] = type_counts.get(kind, 0) + 1
                             if showtime.get("type") == "available" or showtime.get("isSoldOut"):
                                 is_on_sale = True
                 if is_on_sale:
                     on_sale.add(theater["name"])
                 elif has_showtimes:
                     showtimes_only.add(theater["name"])
+                logger.info(f"[showtimes] {slug} {check_date}: {theater['name']}: showtime types {type_counts}")
 
             if on_sale or showtimes_only:
                 status = TicketStatus.ON_SALE if on_sale else TicketStatus.SHOWTIMES_ANNOUNCED
+                logger.info(
+                    f"[showtimes] {slug}: using {check_date} (first date with showtimes) -> {status}, "
+                    f"on_sale={sorted(on_sale)} showtimes_only={sorted(showtimes_only)}"
+                )
                 return ShowtimeCheck(
                     checked_date=check_date,
                     status=status,
@@ -186,6 +196,7 @@ class FandangoClient:
             params={"postalCode": zip_code, "zip": zip_code},
             headers={"Accept": "application/json", "Referer": f"{BASE_URL}/{slug}/movie-overview"},
         )
+        logger.info(f"[raw] movieCalendar {slug} zip={zip_code} status={resp.status_code} body={resp.text}")
         resp.raise_for_status()
         try:
             data = resp.json()
@@ -204,6 +215,10 @@ class FandangoClient:
             url,
             params={"zip": zip_code, "isdesktop": "true", "limit": 5},
             headers={"Accept": "application/json", "Referer": referer},
+        )
+        logger.info(
+            f"[raw] theaterShowtimeGroupings {fandango_id} {check_date} zip={zip_code} "
+            f"status={resp.status_code} body={resp.text}"
         )
         resp.raise_for_status()
         try:

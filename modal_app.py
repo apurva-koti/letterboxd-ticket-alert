@@ -107,7 +107,10 @@ def run_scheduler() -> None:
                 subject, plain_body, html_body = email_alert.format_alert(notification)
                 email_alert.send_email(subject, plain_body, html_body)
                 repo.mark_notified(notification.film.slug)
-                logger.info(f"Email sent: {notification.film.title} ({notification.film.year})")
+                logger.info(
+                    f"Email sent: {notification.film.title} ({notification.film.year}) "
+                    f"theaters={notification.alerted_theaters} url={notification.ticket_url}"
+                )
             except Exception:
                 logger.exception(f"Email failed for {notification.film.title} - will retry next run")
     except Exception as e:

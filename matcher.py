@@ -41,12 +41,15 @@ explains why - "...an exclusive conversation with director Barry Jenkins
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from difflib import SequenceMatcher
 
 from domain import FandangoListing
 from fandango_client import FandangoClient
+
+logger = logging.getLogger("letterboxd-ticket-alert")
 
 MIN_TITLE_SCORE = 0.3
 TITLE_ONLY_MATCH_THRESHOLD = 0.85
@@ -57,11 +60,29 @@ RUNTIME_SHORTER_TOLERANCE_MINUTES = 5
 def find_candidates(
     client: FandangoClient, title: str, director: str | None, runtime: int | None = None, year: int | None = None
 ) -> list[FandangoListing]:
-    plausible = [
-        c for c in client.search(title) if _title_contains(title, c.title) and _similarity(title, c.title) >= MIN_TITLE_SCORE
-    ]
-    plausible = [c for c in plausible if not _year_too_early(year, c.year)]
-    return [c for c in plausible if _is_match(client, c, title, director, runtime)]
+    results = client.search(title)
+    logger.info(
+        f"[match] {title!r} (dir={director!r}, runtime={runtime}, year={year}): "
+        f"search returned {len(results)}: {[f'{c.title} ({c.year}) {c.slug}' for c in results]}"
+    )
+    survivors = []
+    for c in results:
+        label = f"{c.title} ({c.year}) {c.slug}"
+        if not _title_contains(title, c.title):
+            logger.info(f"[match]   drop {label}: title doesn't contain {title!r}")
+            continue
+        score = _similarity(title, c.title)
+        if score < MIN_TITLE_SCORE:
+            logger.info(f"[match]   drop {label}: title similarity {score:.3f} < {MIN_TITLE_SCORE}")
+            continue
+        if _year_too_early(year, c.year):
+            logger.info(f"[match]   drop {label}: year {c.year} predates {year}")
+            continue
+        keep, reason = _is_match(client, c, title, director, runtime)
+        logger.info(f"[match]   {'keep' if keep else 'drop'} {label}: {reason}")
+        if keep:
+            survivors.append(c)
+    return survivors
 
 
 def _title_contains(title: str, candidate_title: str) -> bool:
@@ -82,16 +103,23 @@ def _year_too_early(target_year: int | None, candidate_year: int | None) -> bool
     return candidate_year < target_year
 
 
-def _is_match(client: FandangoClient, c: FandangoListing, title: str, director: str | None, runtime: int | None) -> bool:
+def _is_match(
+    client: FandangoClient, c: FandangoListing, title: str, director: str | None, runtime: int | None
+) -> tuple[bool, str]:
+    """Returns (keep, reason) - the reason is logged for every candidate."""
     c.director, c.runtime, synopsis = client.fetch_details(c.slug) if (director or runtime) else (None, None, None)
 
     if director and c.director:
-        return _directors_match(director, c.director)
+        ok = _directors_match(director, c.director)
+        return ok, f"director {c.director!r} {'matches' if ok else 'contradicts'} {director!r}"
     if director and synopsis and _mentions_director(synopsis, director):
-        return True
+        return True, f"no director listed, synopsis mentions {director!r}"
     if runtime and c.runtime:
-        return not _runtime_too_short(runtime, c.runtime)
-    return _similarity(title, c.title) >= TITLE_ONLY_MATCH_THRESHOLD
+        too_short = _runtime_too_short(runtime, c.runtime)
+        return not too_short, f"no director signal, runtime {c.runtime} vs {runtime} ({'too short' if too_short else 'ok'})"
+    score = _similarity(title, c.title)
+    ok = score >= TITLE_ONLY_MATCH_THRESHOLD
+    return ok, f"no director/runtime signal, title-only similarity {score:.3f} vs {TITLE_ONLY_MATCH_THRESHOLD}"
 
 
 def _mentions_director(synopsis: str, director: str) -> bool:
