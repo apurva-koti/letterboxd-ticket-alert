@@ -44,13 +44,6 @@ def explain(repo: FilmRepository, film: Film, hype_slugs: set[str]) -> None:
     print(f"  On Hype list: {'yes' if is_hype else 'no'}")
     print()
 
-    if tracked.excluded_reason:
-        if is_hype:
-            print(f"  Was excluded as '{tracked.excluded_reason}', now on Hype - will be retried.")
-        else:
-            print(f"  PERMANENTLY EXCLUDED: {tracked.excluded_reason}. Never retried unless added to Hype.")
-        return
-
     print(f"  Anchor date (Letterboxd): {tracked.anchor_date or 'none yet'}")
 
     if tracked.fandango:

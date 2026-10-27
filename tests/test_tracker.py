@@ -507,3 +507,20 @@ def test_hype_film_never_retires(monkeypatch, repo):
     lb.hype = [film]
     Tracker(repo, lb).run("user", "94158", hype_list_url="https://letterboxd.com/x/list/hype/")
     assert repo.get("pickpocket").tier == Tier.MUST_WATCH
+
+
+def test_film_flagged_by_the_old_documentary_exclusion_is_checked_and_unflagged(monkeypatch, repo):
+    """Regression test: removing the documentary exclusion only stopped
+    NEW flags - films flagged before (Koyaanisqatsi, Nuisance Bear, ...)
+    kept their stored flag and were still skipped every run."""
+    film = make_film(slug="nuisance-bear", title="Nuisance Bear")
+    repo.sync_watchlist([film])
+    repo.save_match("nuisance-bear", None, None, excluded_reason="documentary")
+    lb = FakeLetterboxd(watchlist=[film])
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [make_listing(fandango_id="1")])
+    _install_fandango(monkeypatch, FakeFandango(showtimes={"1": make_showtime_check(on_sale_theaters=["Roxie Theater"])}))
+
+    result = Tracker(repo, lb).run("user", "94158")
+
+    assert film in result.alerted
+    assert repo.get("nuisance-bear").excluded_reason is None

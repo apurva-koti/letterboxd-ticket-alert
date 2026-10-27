@@ -87,9 +87,6 @@ class Tracker:
             tracked = self.repo.get(film.slug)
             assert tracked is not None  # just came from all_films()
 
-            if tracked.excluded_reason and not is_hype:
-                logger.info(f"[skip] {film.title}: excluded ({tracked.excluded_reason})")
-                continue
             if not is_due(tracked.next_check_at, now):
                 continue
             if not is_hype and processed >= MAX_PROCESSED_PER_RUN:
