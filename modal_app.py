@@ -143,7 +143,7 @@ def run_scheduler() -> None:
         logger.info(f"Watchlist removed: {f.title} ({f.year})")
 
 
-@app.function(image=image, volumes={"/data": volume}, secrets=[config_ui_secret])
+@app.function(image=image, volumes={"/data": volume}, secrets=[config_ui_secret], region="us")
 @modal.asgi_app()
 def config_ui():
     """The settings form at <app-url>/config/<CONFIG_ACCESS_TOKEN> - see

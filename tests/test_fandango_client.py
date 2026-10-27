@@ -173,7 +173,7 @@ def test_check_showtimes_logs_when_calendar_has_dates_but_nothing_found(monkeypa
         result = client.check_showtimes("123", "misty-green-2026-247569", "94158")
 
     assert result is None
-    assert "every theaterShowtimeGroupings lookup came back empty" in caplog.text
+    assert "but none had an upcoming showing" in caplog.text
 
 
 def test_get_logs_each_blocked_attempt_and_the_final_fallback(monkeypatch, caplog):
