@@ -11,6 +11,7 @@ import modal
 import requests
 
 DB_PATH = "/data/state.db"
+LOG_DIR = "/data/logs"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("letterboxd-ticket-alert")
@@ -62,6 +63,8 @@ image = (
         "email_alert",
         "config",
         "web_app",
+        "checktrace",
+        "run_log",
     )
 )
 
@@ -80,6 +83,31 @@ config_ui_secret = modal.Secret.from_name("config-ui")
     region="us",
 )
 def run_scheduler() -> None:
+    """Each run's log also goes to a text file on the Volume (see run_log.py),
+    kept 30 days - Modal's own logs only go back ~24h."""
+    from datetime import datetime, timezone
+
+    import run_log
+
+    now = datetime.now(timezone.utc)
+    try:
+        handler = run_log.start(LOG_DIR, now, logger)
+    except Exception:
+        logger.warning("Couldn't open this run's log file on the Volume - continuing without it", exc_info=True)
+        handler = None
+    try:
+        _run_scheduler()
+    finally:
+        if handler:
+            run_log.stop(handler, logger)
+        try:
+            run_log.prune(LOG_DIR, now.date())
+        except Exception:
+            logger.warning("Couldn't prune old run logs", exc_info=True)
+        volume.commit()
+
+
+def _run_scheduler() -> None:
     import email_alert
     from letterboxd_client import LetterboxdClient
     from repository import FilmRepository
@@ -129,8 +157,6 @@ def run_scheduler() -> None:
         except Exception:
             logger.exception("Also failed to send the failure-alert email")
         raise
-    finally:
-        volume.commit()
 
     duration = time.monotonic() - start
     logger.info(

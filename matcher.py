@@ -41,15 +41,13 @@ explains why - "...an exclusive conversation with director Barry Jenkins
 
 from __future__ import annotations
 
-import logging
 import re
 import unicodedata
 from difflib import SequenceMatcher
 
+from checktrace import CheckTrace
 from domain import FandangoListing
 from fandango_client import FandangoClient
-
-logger = logging.getLogger("letterboxd-ticket-alert")
 
 MIN_TITLE_SCORE = 0.3
 TITLE_ONLY_MATCH_THRESHOLD = 0.85
@@ -58,31 +56,38 @@ RUNTIME_SHORTER_TOLERANCE_MINUTES = 5
 
 
 def find_candidates(
-    client: FandangoClient, title: str, director: str | None, runtime: int | None = None, year: int | None = None
+    client: FandangoClient,
+    title: str,
+    director: str | None,
+    runtime: int | None = None,
+    year: int | None = None,
+    trace: CheckTrace | None = None,
 ) -> list[FandangoListing]:
+    """Every keep/drop decision and its reason goes on `trace`, if given."""
+    trace = trace or CheckTrace()
     results = client.search(title)
-    logger.info(
-        f"[match] {title!r} (dir={director!r}, runtime={runtime}, year={year}): "
-        f"search returned {len(results)}: {[f'{c.title} ({c.year}) {c.slug}' for c in results]}"
-    )
+    trace.query, trace.result_count = title, len(results)
     survivors = []
     for c in results:
-        label = f"{c.title} ({c.year}) {c.slug}"
-        if not _title_contains(title, c.title):
-            logger.info(f"[match]   drop {label}: title doesn't contain {title!r}")
-            continue
-        score = _similarity(title, c.title)
-        if score < MIN_TITLE_SCORE:
-            logger.info(f"[match]   drop {label}: title similarity {score:.3f} < {MIN_TITLE_SCORE}")
-            continue
-        if _year_too_early(year, c.year):
-            logger.info(f"[match]   drop {label}: year {c.year} predates {year}")
-            continue
-        keep, reason = _is_match(client, c, title, director, runtime)
-        logger.info(f"[match]   {'keep' if keep else 'drop'} {label}: {reason}")
+        keep, reason = _decide(client, c, title, director, runtime, year)
+        entry = trace.candidate(c.slug, label=f"{c.slug}  [{c.title} ({c.year})]")
+        entry.keep, entry.reason = keep, reason
         if keep:
             survivors.append(c)
     return survivors
+
+
+def _decide(
+    client: FandangoClient, c: FandangoListing, title: str, director: str | None, runtime: int | None, year: int | None
+) -> tuple[bool, str]:
+    if not _title_contains(title, c.title):
+        return False, f"title doesn't contain {title!r}"
+    score = _similarity(title, c.title)
+    if score < MIN_TITLE_SCORE:
+        return False, f"title similarity {score:.3f} < {MIN_TITLE_SCORE}"
+    if _year_too_early(year, c.year):
+        return False, f"year {c.year} predates {year}"
+    return _is_match(client, c, title, director, runtime)
 
 
 def _title_contains(title: str, candidate_title: str) -> bool:

@@ -54,11 +54,11 @@ class FakeFandango:
         self.calls = []
         self.searches = []
 
-    def check_showtimes(self, fandango_id, slug, zip_code):
+    def check_showtimes(self, fandango_id, slug, zip_code, trace=None):
         self.calls.append(fandango_id)
         return self.showtimes.get(fandango_id)
 
-    def find_on_sale_at(self, fandango_id, slug, zip_code, theaters):
+    def find_on_sale_at(self, fandango_id, slug, zip_code, theaters, trace=None):
         self.searches.append(fandango_id)
         return set(self.later_on_sale.get(fandango_id, [])) & theaters
 
@@ -524,3 +524,23 @@ def test_film_flagged_by_the_old_documentary_exclusion_is_checked_and_unflagged(
 
     assert film in result.alerted
     assert repo.get("nuisance-bear").excluded_reason is None
+
+
+def test_raw_responses_logged_only_when_status_changes(monkeypatch, repo, caplog):
+    film, lb, fandango = _setup_werwulf(monkeypatch, repo, ["Alamo Drafthouse Cinema New Mission"])
+
+    def check_with_raw(fandango_id, slug, zip_code, trace=None):
+        trace.add_raw("theaterShowtimeGroupings 1 2026-12-25", 200, "RAWBODY")
+        return fandango.showtimes.get(fandango_id)
+
+    fandango.check_showtimes = check_with_raw
+    with caplog.at_level("INFO"):
+        Tracker(repo, lb).run("user", "94158")  # none -> on_sale
+    assert "RAWBODY" in caplog.text
+
+    caplog.clear()
+    _make_due(repo)
+    with caplog.at_level("INFO"):
+        Tracker(repo, lb).run("user", "94158")  # on_sale -> on_sale
+    assert "Werwulf (2026)" in caplog.text
+    assert "RAWBODY" not in caplog.text

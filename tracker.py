@@ -7,6 +7,7 @@ import time
 from datetime import date, datetime, timezone
 
 import matcher
+from checktrace import CheckTrace
 from domain import Film, RunResult, Tier, TicketStatus, TrackedFilm
 from fandango_client import FandangoClient
 from letterboxd_client import LetterboxdClient, pick_anchor
@@ -177,18 +178,17 @@ class Tracker:
         new listing (Moonlight's 10th anniversary) or the original one
         reused without its stored date ever updating (American Psycho) -
         no single "best" candidate covers both, so every one gets checked."""
-        candidates = matcher.find_candidates(fandango, film.title, director, runtime, film.year)
+        trace = CheckTrace()
+        candidates = matcher.find_candidates(fandango, film.title, director, runtime, film.year, trace=trace)
 
         on_sale, showtimes_only, active = set(), set(), None
         for c in candidates:
-            check = fandango.check_showtimes(c.fandango_id, c.slug, zip_code)
+            candidate_trace = trace.candidate(c.slug)
+            if candidate_trace.keep is None:
+                candidate_trace.keep, candidate_trace.reason = True, "kept"
+            check = fandango.check_showtimes(c.fandango_id, c.slug, zip_code, trace=candidate_trace)
             if not check:
-                logger.info(f"[check] {film.title}: candidate {c.slug} -> no showtimes")
                 continue
-            logger.info(
-                f"[check] {film.title}: candidate {c.slug} -> {check.status} on {check.checked_date}, "
-                f"on_sale={check.on_sale_theaters} showtimes_only={check.showtimes_only_theaters}"
-            )
             on_sale.update(check.on_sale_theaters)
             showtimes_only.update(check.showtimes_only_theaters)
             if active is None or check.status == TicketStatus.ON_SALE:
@@ -206,8 +206,9 @@ class Tracker:
         if preferred_theaters and not alerted_preferred and not ((on_sale - blacklisted_theaters) & preferred_theaters):
             if (on_sale - blacklisted_theaters) or previous_status == TicketStatus.ON_SALE:
                 for c in candidates:
-                    found = fandango.find_on_sale_at(c.fandango_id, c.slug, zip_code, preferred_theaters)
-                    logger.info(f"[check] {film.title}: candidate {c.slug} -> preferred search found {sorted(found)}")
+                    found = fandango.find_on_sale_at(
+                        c.fandango_id, c.slug, zip_code, preferred_theaters, trace=trace.candidate(c.slug)
+                    )
                     on_sale.update(found)
 
         # A showing only at a blacklisted theater is treated as if it were
@@ -217,10 +218,6 @@ class Tracker:
         # forever because the status already flipped once.
         alertable_on_sale = on_sale - blacklisted_theaters
         alertable_showtimes_only = showtimes_only - blacklisted_theaters
-        logger.info(
-            f"[check] {film.title}: aggregate on_sale={sorted(on_sale)} showtimes_only={sorted(showtimes_only)}, "
-            f"after blacklist on_sale={sorted(alertable_on_sale)} showtimes_only={sorted(alertable_showtimes_only)}"
-        )
         if alertable_on_sale:
             new_status = TicketStatus.ON_SALE
         elif alertable_showtimes_only:
@@ -273,7 +270,18 @@ class Tracker:
         if clear_history:
             note += f", retired: cleared alert history ({', '.join(previous_alerted_theaters)})"
         desc = _describe(tier, anchor, today)
-        logger.info(f"{film.title} ({film.year}) [{desc}]: {previous_status} -> {new_status}{note}")
+        header = f"{film.title} ({film.year}) [{desc}]: {previous_status} -> {new_status}{note}"
+        details = [f"    film: dir={director!r} runtime={runtime} year={film.year}"]
+        if on_sale or showtimes_only:
+            details.append(
+                f"    on sale: {', '.join(sorted(on_sale)) or '-'} | listed, not bookable: {', '.join(sorted(showtimes_only)) or '-'}"
+            )
+        if on_sale & blacklisted_theaters:
+            details.append(f"    blacklisted, ignored: {', '.join(sorted(on_sale & blacklisted_theaters))}")
+        # Full raw Fandango responses only when the status changed (or the
+        # trace saw something unexpected) - what every past investigation
+        # actually needed, without logging ~30KB per film every check.
+        logger.info(trace.format(header + "\n" + "\n".join(details), include_raw=new_status != previous_status))
 
         result.checked.append(film)
         if should_alert:

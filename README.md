@@ -118,6 +118,24 @@ Prints its anchor date, Fandango match, status, tier, and next check time -
 the quickest way to see what the tracker currently thinks about a film,
 without digging into the database by hand.
 
+## Logs
+
+Every run's log is also saved on the Modal Volume for 30 days (Modal's own
+logs only go back about a day), one file per run:
+
+```bash
+modal volume ls letterboxd-ticket-alert-db logs                 # days available
+modal volume get letterboxd-ticket-alert-db logs/2026-10-27 .   # one day's runs
+grep -A30 "Misty Green" 2026-10-27/*.log
+```
+
+Each film checked gets one block: a summary line (status before -> after,
+and why), then everything the decision was based on - every Fandango
+listing found and why it was kept or dropped, the dates Fandango lists,
+and every showing at each theater on the date that was read, marked
+`open`, `sold out`, or `past`. The full raw Fandango responses are added
+when the status changed, or when Fandango returned something unexpected.
+
 ## Testing
 
 ```bash
@@ -210,6 +228,8 @@ Runs every 15 minutes, so tolerating flaky sites matters:
 | `config.py` | Your personal config (first-run defaults; see Settings above) |
 | `web_app.py` | The settings form served at `/config/<token>` |
 | `modal_app.py` | The deployed cron + the settings-form web endpoint |
+| `checktrace.py` | Collects what one film's check saw, logged as one block |
+| `run_log.py` | Saves each run's log to the Volume for 30 days |
 | `why.py` | Diagnostic: why is/isn't a film being tracked |
 
 ## Known limitations

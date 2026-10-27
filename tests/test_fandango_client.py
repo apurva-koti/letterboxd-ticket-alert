@@ -118,11 +118,11 @@ def test_check_showtimes_checks_only_the_real_calendar_dates(monkeypatch):
     the real page's date picker uses - means there's no window to guess:
     we only ever check dates it says actually have something."""
     client = _client_with_stubbed_get(lambda url, **kw: FakeResponse(text="ok"))
-    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code: [date(2026, 10, 30)])
+    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code, trace=None: [date(2026, 10, 30)])
 
     seen_dates = []
 
-    def fake_showtime_grouping(fandango_id, zip_code, check_date, referer, limit=fc.DEFAULT_THEATER_LIMIT):
+    def fake_showtime_grouping(fandango_id, zip_code, check_date, referer, limit=fc.DEFAULT_THEATER_LIMIT, trace=None):
         seen_dates.append(check_date)
         return None
 
@@ -134,7 +134,7 @@ def test_check_showtimes_checks_only_the_real_calendar_dates(monkeypatch):
 
 def test_check_showtimes_returns_none_when_calendar_is_empty(monkeypatch):
     client = _client_with_stubbed_get(lambda url, **kw: FakeResponse(text="ok"))
-    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code: [])
+    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code, trace=None: [])
 
     assert client.check_showtimes("123", "some-slug", "94158") is None
 
@@ -166,7 +166,7 @@ def test_check_showtimes_logs_when_calendar_has_dates_but_nothing_found(monkeypa
     per-date lookup came back empty" - the second case is the one with no
     redundancy left to fall back on for a film with only a date or two."""
     client = _client_with_stubbed_get(lambda url, **kw: FakeResponse(text="ok"))
-    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code: [date(2026, 10, 30)])
+    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code, trace=None: [date(2026, 10, 30)])
     monkeypatch.setattr(client, "_showtime_grouping", lambda *a, **k: None)
 
     with caplog.at_level("WARNING"):
@@ -202,14 +202,14 @@ def _grouping(*theaters):
 
 def test_find_on_sale_at_looks_past_the_first_date_with_every_theater(monkeypatch):
     client = _client_with_stubbed_get(lambda url, **kw: FakeResponse(text="ok"))
-    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code: [date(2026, 12, 18), date(2026, 12, 25), date(2026, 12, 26)])
+    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code, trace=None: [date(2026, 12, 18), date(2026, 12, 25), date(2026, 12, 26)])
     by_date = {
         date(2026, 12, 18): _grouping(("Alamo Drafthouse Cinema New Mission", "available")),
         date(2026, 12, 25): _grouping(("Alamo Drafthouse Cinema New Mission", "available"), ("AMC Metreon 16", "available")),
     }
     calls = []
 
-    def fake_grouping(fandango_id, zip_code, check_date, referer, limit=fc.DEFAULT_THEATER_LIMIT):
+    def fake_grouping(fandango_id, zip_code, check_date, referer, limit=fc.DEFAULT_THEATER_LIMIT, trace=None):
         calls.append((check_date, limit))
         return by_date.get(check_date)
 
@@ -222,7 +222,7 @@ def test_find_on_sale_at_looks_past_the_first_date_with_every_theater(monkeypatc
 
 def test_find_on_sale_at_ignores_showtimes_not_yet_bookable(monkeypatch):
     client = _client_with_stubbed_get(lambda url, **kw: FakeResponse(text="ok"))
-    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code: [date(2026, 12, 25)])
+    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code, trace=None: [date(2026, 12, 25)])
     monkeypatch.setattr(
         client, "_showtime_grouping", lambda *a, **k: _grouping(("AMC Metreon 16", "notAvailable"))
     )
@@ -236,12 +236,12 @@ def test_finished_day_is_skipped_for_the_next_date(monkeypatch):
     as "listed, not bookable" - the film dropped off sale and the next
     check re-alerted. A finished day must be skipped instead."""
     client = _client_with_stubbed_get(lambda url, **kw: FakeResponse(text="ok"))
-    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code: [date(2026, 10, 25), date(2026, 10, 26)])
+    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code, trace=None: [date(2026, 10, 25), date(2026, 10, 26)])
     by_date = {
         date(2026, 10, 25): _grouping(("AMC Metreon 16", "pastshowtime"), ("Apple Cinemas Van Ness", "pastshowtime")),
         date(2026, 10, 26): _grouping(("AMC Metreon 16", "available"), ("Presidio Theatre", "available")),
     }
-    monkeypatch.setattr(client, "_showtime_grouping", lambda fid, z, d, ref, limit=fc.DEFAULT_THEATER_LIMIT: by_date[d])
+    monkeypatch.setattr(client, "_showtime_grouping", lambda fid, z, d, ref, limit=fc.DEFAULT_THEATER_LIMIT, trace=None: by_date[d])
 
     check = client.check_showtimes("244998", "sense-and-sensibility-2026-244998", "94158")
 
@@ -254,7 +254,7 @@ def test_finished_day_is_skipped_for_the_next_date(monkeypatch):
 def test_past_showings_dont_make_a_theater_showtimes_only_when_later_ones_remain(monkeypatch):
     """Tonight with a 7pm show done and a 10pm show still bookable: on sale."""
     client = _client_with_stubbed_get(lambda url, **kw: FakeResponse(text="ok"))
-    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code: [date(2026, 10, 26)])
+    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code, trace=None: [date(2026, 10, 26)])
     grouping = _grouping(("AMC Metreon 16", "pastshowtime"), ("The New Parkway", "pastshowtime"))
     grouping["theaterShowtimes"]["theaters"][0]["variants"][0]["amenityGroups"][0]["showtimes"].append({"type": "available"})
     monkeypatch.setattr(client, "_showtime_grouping", lambda *a, **k: grouping)
@@ -267,6 +267,20 @@ def test_past_showings_dont_make_a_theater_showtimes_only_when_later_ones_remain
 
 def test_only_finished_days_left_means_no_showtimes(monkeypatch):
     client = _client_with_stubbed_get(lambda url, **kw: FakeResponse(text="ok"))
-    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code: [date(2026, 10, 26)])
+    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code, trace=None: [date(2026, 10, 26)])
     monkeypatch.setattr(client, "_showtime_grouping", lambda *a, **k: _grouping(("The New Parkway", "pastshowtime")))
     assert client.check_showtimes("1", "naza", "94158") is None
+
+
+def test_unknown_showtime_type_is_flagged_on_the_trace(monkeypatch):
+    from checktrace import CandidateTrace
+
+    client = _client_with_stubbed_get(lambda url, **kw: FakeResponse(text="ok"))
+    monkeypatch.setattr(client, "_movie_calendar", lambda slug, zip_code, trace=None: [date(2026, 12, 25)])
+    monkeypatch.setattr(client, "_showtime_grouping", lambda *a, **k: _grouping(("AMC Metreon 16", "presale")))
+    trace = CandidateTrace(label="werwulf")
+
+    client.check_showtimes("1", "werwulf", "94158", trace=trace)
+
+    assert trace.anomalies == ["unknown showtime type 'presale' at AMC Metreon 16 2026-12-25"]
+    assert trace.dates[0].theaters[0].other == ["presale ?"]
