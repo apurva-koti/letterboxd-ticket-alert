@@ -61,6 +61,7 @@ class Tracker:
         zip_code: str,
         hype_list_url: str | None = None,
         blacklisted_theaters: frozenset[str] = frozenset(),
+        preferred_theaters: frozenset[str] = frozenset(),
     ) -> RunResult:
         result = RunResult()
         now = datetime.now(timezone.utc)
@@ -98,7 +99,9 @@ class Tracker:
 
             time.sleep(REQUEST_DELAY_SECONDS)
             try:
-                self._process_film(fandango, film, tracked, is_hype, zip_code, blacklisted_theaters, now, result)
+                self._process_film(
+                    fandango, film, tracked, is_hype, zip_code, blacklisted_theaters, preferred_theaters, now, result
+                )
             except Exception:
                 logger.warning(f"{film.title} ({film.year}): check failed, will retry next run", exc_info=True)
 
@@ -112,6 +115,7 @@ class Tracker:
         is_hype: bool,
         zip_code: str,
         blacklisted_theaters: frozenset[str],
+        preferred_theaters: frozenset[str],
         now: datetime,
         result: RunResult,
     ) -> None:
@@ -132,11 +136,13 @@ class Tracker:
             runtime,
             poster_url,
             tracked.status,
-            tier,
+            tracked.alerted_theaters,
+            is_hype,
             anchor,
             today,
             zip_code,
             blacklisted_theaters,
+            preferred_theaters,
             now,
             result,
         )
@@ -159,11 +165,13 @@ class Tracker:
         runtime: int | None,
         poster_url: str | None,
         previous_status: TicketStatus,
-        tier: Tier,
+        previous_alerted_theaters: list[str],
+        is_hype: bool,
         anchor: date | None,
         today: date,
         zip_code: str,
         blacklisted_theaters: frozenset[str],
+        preferred_theaters: frozenset[str],
         now: datetime,
         result: RunResult,
     ) -> None:
@@ -189,6 +197,22 @@ class Tracker:
             if active is None or check.status == TicketStatus.ON_SALE:
                 active = c
 
+        # When the film is (or is about to be) on sale but no preferred
+        # theater has been seen yet, look past the first date and past the
+        # 5-nearest cap for one - e.g. Werwulf's first date being an
+        # Alamo-only preview while Metreon already sells opening-day tickets.
+        # Alert history only counts while the film is still on sale - once
+        # it's off sale, the next time it's on sale is a fresh run.
+        alerted_preferred = (
+            set(previous_alerted_theaters) & preferred_theaters if previous_status == TicketStatus.ON_SALE else set()
+        )
+        if preferred_theaters and not alerted_preferred and not ((on_sale - blacklisted_theaters) & preferred_theaters):
+            if (on_sale - blacklisted_theaters) or previous_status == TicketStatus.ON_SALE:
+                for c in candidates:
+                    found = fandango.find_on_sale_at(c.fandango_id, c.slug, zip_code, preferred_theaters)
+                    logger.info(f"[check] {film.title}: candidate {c.slug} -> preferred search found {sorted(found)}")
+                    on_sale.update(found)
+
         # A showing only at a blacklisted theater is treated as if it were
         # never on sale at all - not just "don't email about it" - so the
         # status itself stays clear of ON_SALE and a real alert still fires
@@ -206,7 +230,22 @@ class Tracker:
             new_status = TicketStatus.SHOWTIMES_ANNOUNCED
         else:
             new_status = TicketStatus.NONE
-        should_alert = new_status == TicketStatus.ON_SALE and previous_status != TicketStatus.ON_SALE
+        first_alert = new_status == TicketStatus.ON_SALE and previous_status != TicketStatus.ON_SALE
+        # One more alert when a preferred theater opens after an alert that
+        # listed none - e.g. Alamo alerted first, then Metreon goes on sale.
+        preferred_on_sale = alertable_on_sale & preferred_theaters
+        upgrade_alert = (
+            previous_status == TicketStatus.ON_SALE
+            and bool(preferred_on_sale)
+            and not alerted_preferred
+        )
+        should_alert = first_alert or upgrade_alert
+
+        # Tier comes after the check: a film past its release window only
+        # retires once it's actually off sale, and retiring ends its run -
+        # alert history is cleared so a later re-release starts clean.
+        tier = compute_tier(anchor, today, is_hype, on_sale=new_status == TicketStatus.ON_SALE)
+        clear_history = tier == Tier.RETIRED and bool(previous_alerted_theaters)
 
         self.repo.save_match(film.slug, active, anchor, director=director, runtime=runtime, poster_url=poster_url)
         self.repo.save_status(
@@ -220,9 +259,13 @@ class Tracker:
             next_check_at(tier, now),
             alerted_theaters=sorted(alertable_on_sale) if should_alert else None,
         )
+        if clear_history:
+            self.repo.clear_alert_history(film.slug)
 
         blacklisted_on_sale = on_sale & blacklisted_theaters
-        if should_alert:
+        if upgrade_alert:
+            note = f", ALERT (preferred theater: {', '.join(sorted(preferred_on_sale))}) at {', '.join(sorted(alertable_on_sale))}"
+        elif should_alert:
             note = f", ALERT at {', '.join(sorted(alertable_on_sale))}"
         elif blacklisted_on_sale and not alertable_on_sale:
             note = f", on sale only at blacklisted theater(s), skipping: {', '.join(sorted(blacklisted_on_sale))}"
@@ -230,6 +273,8 @@ class Tracker:
             note = ", no Fandango listing found"
         else:
             note = ""
+        if clear_history:
+            note += f", retired: cleared alert history ({', '.join(previous_alerted_theaters)})"
         desc = _describe(tier, anchor, today)
         logger.info(f"{film.title} ({film.year}) [{desc}]: {previous_status} -> {new_status}{note}")
 

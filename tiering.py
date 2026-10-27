@@ -21,7 +21,10 @@ INTERVALS: dict[Tier, timedelta] = {
 }
 
 
-def compute_tier(anchor: date | None, today: date, is_hype: bool = False) -> Tier:
+def compute_tier(anchor: date | None, today: date, is_hype: bool = False, on_sale: bool = False) -> Tier:
+    """RETIRED means the run is over: released more than RECENT_WINDOW_DAYS
+    ago AND not on sale. A film still selling tickets past that (a long
+    first run, or a re-release of an old film) stays RECENT."""
     if is_hype:
         return Tier.MUST_WATCH
     if anchor is None:
@@ -29,7 +32,7 @@ def compute_tier(anchor: date | None, today: date, is_hype: bool = False) -> Tie
 
     days_until = (anchor - today).days
     if days_until < -RECENT_WINDOW_DAYS:
-        return Tier.RETIRED
+        return Tier.RECENT if on_sale else Tier.RETIRED
     if days_until <= 0:
         return Tier.RECENT
     if days_until <= HOT_WINDOW_DAYS:

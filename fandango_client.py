@@ -39,6 +39,14 @@ RETRY_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECONDS = 1.5
 SNIPPET_LENGTH = 200
 
+# The normal check asks for the 5 nearest theaters showing a film on a
+# date. Looking for specific (preferred) theaters needs every theater, or a
+# farther one gets cut off behind 5 closer ones.
+DEFAULT_THEATER_LIMIT = 5
+FULL_THEATER_LIMIT = 100
+MAX_SEARCH_DATES = 21
+PAST_SHOWTIME_TYPE = "pastshowtime"
+
 def _looks_blocked(resp: requests.Response) -> bool:
     return BLOCK_PAGE_MARKER in resp.text or not resp.text.strip()
 
@@ -137,6 +145,18 @@ class FandangoClient:
         director = directors[0].get("name") if directors else None
         return director, movie.get("duration"), movie.get("description")
 
+    def nearby_theaters(self, zip_code: str, radius_miles: int) -> list[tuple[str, float]]:
+        """(name, distance in miles) for every theater Fandango lists within
+        the radius, nearest first - what the settings form offers to pick from."""
+        resp = self._get(
+            f"{BASE_URL}/napi/nearbyTheaters",
+            params={"zipCode": zip_code, "radius": radius_miles, "limit": 500},
+            headers={"Accept": "application/json", "Referer": f"{BASE_URL}/{zip_code}_movietimes"},
+        )
+        resp.raise_for_status()
+        theaters = [(t["name"], float(t.get("distance") or 0)) for t in resp.json().get("theaters", [])]
+        return sorted((t for t in theaters if t[1] <= radius_miles), key=lambda t: t[1])
+
     def check_showtimes(self, fandango_id: str, slug: str, zip_code: str) -> ShowtimeCheck | None:
         """Looks up which dates actually have showtimes via Fandango's own
         movieCalendar endpoint (what the real date-picker on the movie page
@@ -153,24 +173,7 @@ class FandangoClient:
                 logger.info(f"[showtimes] {slug} {check_date}: no showtime data")
                 continue
 
-            on_sale, showtimes_only = set(), set()
-            for theater in data["theaterShowtimes"].get("theaters", []):
-                is_on_sale, has_showtimes = False, False
-                type_counts: dict[str, int] = {}
-                for variant in theater.get("variants", []):
-                    for group in variant.get("amenityGroups", []):
-                        for showtime in group.get("showtimes", []):
-                            has_showtimes = True
-                            kind = "soldOut" if showtime.get("isSoldOut") else str(showtime.get("type"))
-                            type_counts[kind] = type_counts.get(kind, 0) + 1
-                            if showtime.get("type") == "available" or showtime.get("isSoldOut"):
-                                is_on_sale = True
-                if is_on_sale:
-                    on_sale.add(theater["name"])
-                elif has_showtimes:
-                    showtimes_only.add(theater["name"])
-                logger.info(f"[showtimes] {slug} {check_date}: {theater['name']}: showtime types {type_counts}")
-
+            on_sale, showtimes_only = _parse_theaters(slug, check_date, data)
             if on_sale or showtimes_only:
                 status = TicketStatus.ON_SALE if on_sale else TicketStatus.SHOWTIMES_ANNOUNCED
                 logger.info(
@@ -186,9 +189,31 @@ class FandangoClient:
         if calendar_dates:
             logger.warning(
                 f"check_showtimes for {slug} ({fandango_id}): calendar had {len(calendar_dates)} date(s) "
-                f"({calendar_dates}) but every theaterShowtimeGroupings lookup came back empty"
+                f"({calendar_dates}) but none had an upcoming showing (empty, or only finished showings)"
             )
         return None
+
+    def find_on_sale_at(self, fandango_id: str, slug: str, zip_code: str, theaters: frozenset[str]) -> set[str]:
+        """Which of `theaters` have tickets on sale on ANY calendar date, not
+        just the first one check_showtimes looks at - e.g. a film whose first
+        date is an Alamo-only preview, while Metreon already sells tickets for
+        opening day. Stops at the first date where one is found."""
+        referer = f"{BASE_URL}/{slug}/movie-overview"
+        calendar_dates = self._movie_calendar(slug, zip_code)
+        for check_date in calendar_dates[:MAX_SEARCH_DATES]:
+            data = self._showtime_grouping(fandango_id, zip_code, check_date, referer, limit=FULL_THEATER_LIMIT)
+            if not data:
+                continue
+            on_sale, _ = _parse_theaters(slug, check_date, data)
+            found = on_sale & theaters
+            if found:
+                logger.info(f"[showtimes] {slug}: preferred theater(s) on sale on {check_date}: {sorted(found)}")
+                return found
+        logger.info(
+            f"[showtimes] {slug}: no preferred theater on sale across {min(len(calendar_dates), MAX_SEARCH_DATES)} "
+            f"of {len(calendar_dates)} calendar date(s)"
+        )
+        return set()
 
     def _movie_calendar(self, slug: str, zip_code: str) -> list[date]:
         resp = self._get(
@@ -209,15 +234,17 @@ class FandangoClient:
         dates = (data.get("movieCalendar") or {}).get("showtimeDates") or []
         return [date.fromisoformat(d) for d in dates]
 
-    def _showtime_grouping(self, fandango_id: str, zip_code: str, check_date: date, referer: str) -> dict | None:
+    def _showtime_grouping(
+        self, fandango_id: str, zip_code: str, check_date: date, referer: str, limit: int = DEFAULT_THEATER_LIMIT
+    ) -> dict | None:
         url = f"{BASE_URL}/napi/theaterShowtimeGroupings/{fandango_id}/{check_date.isoformat()}"
         resp = self._get(
             url,
-            params={"zip": zip_code, "isdesktop": "true", "limit": 5},
+            params={"zip": zip_code, "isdesktop": "true", "limit": limit},
             headers={"Accept": "application/json", "Referer": referer},
         )
         logger.info(
-            f"[raw] theaterShowtimeGroupings {fandango_id} {check_date} zip={zip_code} "
+            f"[raw] theaterShowtimeGroupings {fandango_id} {check_date} zip={zip_code} limit={limit} "
             f"status={resp.status_code} body={resp.text}"
         )
         resp.raise_for_status()
@@ -227,3 +254,32 @@ class FandangoClient:
             logger.warning(f"theaterShowtimeGroupings for {fandango_id} on {check_date} didn't parse as JSON: {_snippet(resp)}")
             return None
         return data if data.get("hasShowtimes") else None
+
+
+def _parse_theaters(slug: str, check_date: date, data: dict) -> tuple[set[str], set[str]]:
+    """(on_sale, showtimes_only) theater names from one theaterShowtimeGroupings response."""
+    on_sale, showtimes_only = set(), set()
+    for theater in data["theaterShowtimes"].get("theaters", []):
+        is_on_sale, has_showtimes = False, False
+        type_counts: dict[str, int] = {}
+        for variant in theater.get("variants", []):
+            for group in variant.get("amenityGroups", []):
+                for showtime in group.get("showtimes", []):
+                    kind = "soldOut" if showtime.get("isSoldOut") else str(showtime.get("type"))
+                    type_counts[kind] = type_counts.get(kind, 0) + 1
+                    # A showing that already started says nothing about
+                    # ticket sales. Counting it as "listed, not bookable"
+                    # made a finished day (yesterday after midnight, or
+                    # today after its last show) read as off sale, and the
+                    # next check re-alerted - the duplicate emails.
+                    if showtime.get("type") == PAST_SHOWTIME_TYPE:
+                        continue
+                    has_showtimes = True
+                    if showtime.get("type") == "available" or showtime.get("isSoldOut"):
+                        is_on_sale = True
+        if is_on_sale:
+            on_sale.add(theater["name"])
+        elif has_showtimes:
+            showtimes_only.add(theater["name"])
+        logger.info(f"[showtimes] {slug} {check_date}: {theater['name']}: showtime types {type_counts}")
+    return on_sale, showtimes_only

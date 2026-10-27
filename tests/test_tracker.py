@@ -48,13 +48,19 @@ class FakeLetterboxd:
 
 
 class FakeFandango:
-    def __init__(self, showtimes=None):
+    def __init__(self, showtimes=None, later_on_sale=None):
         self.showtimes = showtimes or {}
+        self.later_on_sale = later_on_sale or {}  # fandango_id -> theaters on sale on ANY date
         self.calls = []
+        self.searches = []
 
     def check_showtimes(self, fandango_id, slug, zip_code):
         self.calls.append(fandango_id)
         return self.showtimes.get(fandango_id)
+
+    def find_on_sale_at(self, fandango_id, slug, zip_code, theaters):
+        self.searches.append(fandango_id)
+        return set(self.later_on_sale.get(fandango_id, [])) & theaters
 
 
 @pytest.fixture
@@ -306,3 +312,198 @@ def test_one_films_failure_does_not_block_the_rest(monkeypatch, repo):
     result = Tracker(repo, lb).run("user", "94158")
     assert fine in result.checked
     assert broken not in result.checked
+
+
+def _make_due(repo):
+    repo.conn.execute("UPDATE ticket_status SET next_check_at = ?", ((datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),))
+    repo.conn.commit()
+
+
+def _setup_werwulf(monkeypatch, repo, first_theaters):
+    film = make_film(slug="werwulf", title="Werwulf")
+    release = LetterboxdRelease(director=None, genres=[], poster_url=None, us_dates=[date.today() + timedelta(days=40)])
+    lb = FakeLetterboxd(watchlist=[film], releases={"werwulf": release})
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [make_listing(fandango_id="1")])
+    fandango = FakeFandango(showtimes={"1": make_showtime_check(on_sale_theaters=first_theaters)})
+    _install_fandango(monkeypatch, fandango)
+    return film, lb, fandango
+
+
+PREFERRED = frozenset({"AMC Metreon 16", "AMC Kabuki 8"})
+
+
+def test_preferred_theater_opening_after_a_non_preferred_alert_alerts_once_more(monkeypatch, repo, caplog):
+    film, lb, fandango = _setup_werwulf(monkeypatch, repo, ["Alamo Drafthouse Cinema New Mission"])
+    assert film in Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED).alerted
+    repo.mark_notified("werwulf")
+
+    _make_due(repo)
+    fandango.showtimes["1"] = make_showtime_check(on_sale_theaters=["AMC Metreon 16", "Alamo Drafthouse Cinema New Mission"])
+    with caplog.at_level("INFO"):
+        result = Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)
+
+    assert film in result.alerted
+    assert "ALERT (preferred theater: AMC Metreon 16)" in caplog.text
+    tracked = repo.get("werwulf")
+    assert tracked.alerted_theaters == ["AMC Metreon 16", "Alamo Drafthouse Cinema New Mission"]
+    assert [n.film.slug for n in repo.get_unnotified()] == ["werwulf"]
+
+    # A second preferred theater after that doesn't alert again.
+    repo.mark_notified("werwulf")
+    _make_due(repo)
+    fandango.showtimes["1"] = make_showtime_check(
+        on_sale_theaters=["AMC Kabuki 8", "AMC Metreon 16", "Alamo Drafthouse Cinema New Mission"]
+    )
+    assert film not in Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED).alerted
+    assert repo.get_unnotified() == []
+
+
+def test_non_preferred_theater_after_a_preferred_alert_does_not_alert(monkeypatch, repo):
+    film, lb, fandango = _setup_werwulf(monkeypatch, repo, ["AMC Metreon 16"])
+    assert film in Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED).alerted
+
+    _make_due(repo)
+    fandango.showtimes["1"] = make_showtime_check(on_sale_theaters=["AMC Metreon 16", "Alamo Drafthouse Cinema New Mission"])
+    assert film not in Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED).alerted
+
+
+def test_blacklisted_preferred_theater_does_not_trigger_an_upgrade(monkeypatch, repo):
+    film, lb, fandango = _setup_werwulf(monkeypatch, repo, ["Alamo Drafthouse Cinema New Mission"])
+    Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)
+
+    _make_due(repo)
+    fandango.showtimes["1"] = make_showtime_check(on_sale_theaters=["AMC Metreon 16", "Alamo Drafthouse Cinema New Mission"])
+    result = Tracker(repo, lb).run(
+        "user", "94158", preferred_theaters=PREFERRED, blacklisted_theaters=frozenset({"AMC Metreon 16"})
+    )
+    assert film not in result.alerted
+
+
+def test_no_preferred_theaters_means_one_alert_as_before(monkeypatch, repo):
+    film, lb, fandango = _setup_werwulf(monkeypatch, repo, ["Alamo Drafthouse Cinema New Mission"])
+    Tracker(repo, lb).run("user", "94158")
+
+    _make_due(repo)
+    fandango.showtimes["1"] = make_showtime_check(on_sale_theaters=["AMC Metreon 16", "Alamo Drafthouse Cinema New Mission"])
+    assert film not in Tracker(repo, lb).run("user", "94158").alerted
+
+
+def test_preferred_theater_on_a_later_date_is_included_in_the_first_alert(monkeypatch, repo):
+    """Werwulf case: the first calendar date is an Alamo-only preview, but
+    Metreon already sells tickets for opening day - the first alert should
+    say so, not wait for the preview date to pass."""
+    film, lb, fandango = _setup_werwulf(monkeypatch, repo, ["Alamo Drafthouse Cinema New Mission"])
+    fandango.later_on_sale["1"] = ["AMC Metreon 16", "Alamo Drafthouse Cinema New Mission"]
+
+    assert film in Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED).alerted
+    assert repo.get("werwulf").alerted_theaters == ["AMC Metreon 16", "Alamo Drafthouse Cinema New Mission"]
+
+
+def test_film_alerted_without_a_preferred_theater_keeps_searching_later_dates(monkeypatch, repo):
+    film, lb, fandango = _setup_werwulf(monkeypatch, repo, ["Alamo Drafthouse Cinema New Mission"])
+    Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)
+    repo.mark_notified("werwulf")
+
+    # Metreon opens opening-day sales; the first date is still the Alamo-only preview.
+    _make_due(repo)
+    fandango.later_on_sale["1"] = ["AMC Metreon 16"]
+    result = Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)
+
+    assert film in result.alerted
+    assert "AMC Metreon 16" in repo.get("werwulf").alerted_theaters
+
+
+def test_no_extra_search_once_a_preferred_theater_has_been_alerted(monkeypatch, repo):
+    film, lb, fandango = _setup_werwulf(monkeypatch, repo, ["AMC Metreon 16"])
+    Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)
+
+    _make_due(repo)
+    fandango.showtimes["1"] = make_showtime_check(on_sale_theaters=["Alamo Drafthouse Cinema New Mission"])
+    Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)
+    assert fandango.searches == []
+
+
+def test_no_extra_search_when_nothing_is_on_sale_yet(monkeypatch, repo):
+    film, lb, fandango = _setup_werwulf(monkeypatch, repo, [])
+    fandango.showtimes["1"] = None
+    Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)
+    assert fandango.searches == []
+
+
+def _setup_old_film(monkeypatch, repo, theaters):
+    film = make_film(slug="pickpocket", title="Pickpocket", year=1959)
+    release = LetterboxdRelease(director=None, genres=[], poster_url=None, us_dates=[date(1959, 12, 16)])
+    lb = FakeLetterboxd(watchlist=[film], releases={"pickpocket": release})
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [make_listing(fandango_id="1")])
+    fandango = FakeFandango(showtimes={"1": make_showtime_check(on_sale_theaters=theaters) if theaters else None})
+    _install_fandango(monkeypatch, fandango)
+    return film, lb, fandango
+
+
+def test_old_film_on_sale_is_recent_not_retired(monkeypatch, repo):
+    film, lb, _ = _setup_old_film(monkeypatch, repo, ["Lark Theater"])
+    assert film in Tracker(repo, lb).run("user", "94158").alerted
+    assert repo.get("pickpocket").tier == Tier.RECENT
+
+
+def test_going_off_sale_after_release_window_retires_and_clears_alert_history(monkeypatch, repo, caplog):
+    film, lb, fandango = _setup_old_film(monkeypatch, repo, ["Lark Theater"])
+    Tracker(repo, lb).run("user", "94158")
+
+    _make_due(repo)
+    fandango.showtimes["1"] = None
+    with caplog.at_level("INFO"):
+        Tracker(repo, lb).run("user", "94158")
+
+    tracked = repo.get("pickpocket")
+    assert tracked.tier == Tier.RETIRED
+    assert tracked.status == TicketStatus.NONE
+    assert tracked.alerted_theaters == []
+    assert tracked.alerted_at is None
+    assert "retired: cleared alert history (Lark Theater)" in caplog.text
+
+
+def test_re_release_after_retirement_alerts_fresh_with_preferred_search(monkeypatch, repo):
+    """Re-release after a past run that alerted at Metreon: the new run
+    must search for a preferred theater on its first alert, not trust the
+    old run's history."""
+    film, lb, fandango = _setup_old_film(monkeypatch, repo, ["AMC Metreon 16"])
+    Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)
+    _make_due(repo)
+    fandango.showtimes["1"] = None
+    Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)  # retires
+
+    _make_due(repo)
+    fandango.showtimes["1"] = make_showtime_check(on_sale_theaters=["Lark Theater"])
+    fandango.later_on_sale["1"] = ["AMC Kabuki 8"]
+    result = Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)
+
+    assert film in result.alerted
+    assert repo.get("pickpocket").alerted_theaters == ["AMC Kabuki 8", "Lark Theater"]
+
+
+def test_brief_flip_off_sale_ignores_old_history_on_return(monkeypatch, repo):
+    """Within the release window history isn't cleared, but it only counts
+    while on sale - coming back on sale still gets the preferred search."""
+    film, lb, fandango = _setup_werwulf(monkeypatch, repo, ["AMC Metreon 16"])
+    Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)
+    _make_due(repo)
+    fandango.showtimes["1"] = None
+    Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)
+    assert repo.get("werwulf").tier != Tier.RETIRED
+
+    _make_due(repo)
+    fandango.showtimes["1"] = make_showtime_check(on_sale_theaters=["Alamo Drafthouse Cinema New Mission"])
+    fandango.later_on_sale["1"] = ["AMC Metreon 16"]
+    result = Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)
+
+    assert film in result.alerted
+    assert fandango.searches == ["1"]
+    assert "AMC Metreon 16" in repo.get("werwulf").alerted_theaters
+
+
+def test_hype_film_never_retires(monkeypatch, repo):
+    film, lb, fandango = _setup_old_film(monkeypatch, repo, None)
+    lb.hype = [film]
+    Tracker(repo, lb).run("user", "94158", hype_list_url="https://letterboxd.com/x/list/hype/")
+    assert repo.get("pickpocket").tier == Tier.MUST_WATCH

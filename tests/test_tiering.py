@@ -51,3 +51,9 @@ def test_is_due_false_before_scheduled_time():
 def test_is_due_true_after_scheduled_time():
     now = datetime.now(timezone.utc)
     assert tiering.is_due(now - timedelta(hours=1), now) is True
+
+
+def test_past_release_window_but_on_sale_is_recent_not_retired():
+    old = TODAY - timedelta(days=400)
+    assert tiering.compute_tier(old, TODAY, on_sale=True) == Tier.RECENT
+    assert tiering.compute_tier(old, TODAY, on_sale=False) == Tier.RETIRED

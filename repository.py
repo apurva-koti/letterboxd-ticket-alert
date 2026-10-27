@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS config (
     letterboxd_username TEXT,
     zip_code TEXT,
     hype_list_url TEXT,
-    blacklisted_theaters TEXT
+    blacklisted_theaters TEXT,
+    preferred_theaters TEXT
 );
 """
 
@@ -66,6 +67,7 @@ MIGRATIONS = [
     "ALTER TABLE fandango_matches ADD COLUMN director TEXT",
     "ALTER TABLE fandango_matches ADD COLUMN runtime INTEGER",
     "ALTER TABLE ticket_status ADD COLUMN alerted_theaters TEXT",
+    "ALTER TABLE config ADD COLUMN preferred_theaters TEXT",
 ]
 
 
@@ -288,7 +290,9 @@ class FilmRepository:
                 alerted_theaters = CASE
                     WHEN excluded.alerted_at IS NOT NULL THEN excluded.alerted_theaters ELSE ticket_status.alerted_theaters
                 END,
-                notified_at = CASE WHEN excluded.status != 'on_sale' THEN NULL ELSE ticket_status.notified_at END,
+                notified_at = CASE
+                    WHEN excluded.status != 'on_sale' OR excluded.alerted_at IS NOT NULL THEN NULL ELSE ticket_status.notified_at
+                END,
                 tier = excluded.tier, next_check_at = excluded.next_check_at
             """,
             {
@@ -303,6 +307,13 @@ class FilmRepository:
                 "tier": tier.value,
                 "next_check": next_check_at.isoformat(),
             },
+        )
+        self.conn.commit()
+
+    def clear_alert_history(self, slug: str) -> None:
+        self.conn.execute(
+            "UPDATE ticket_status SET alerted_at = NULL, alerted_theaters = NULL, notified_at = NULL WHERE letterboxd_slug = ?",
+            (slug,),
         )
         self.conn.commit()
 
@@ -385,6 +396,7 @@ class FilmRepository:
                 zip_code=row["zip_code"],
                 hype_list_url=row["hype_list_url"],
                 blacklisted_theaters=_parse_theater_list(row["blacklisted_theaters"]),
+                preferred_theaters=_parse_theater_list(row["preferred_theaters"]),
             )
         defaults = defaults or Config(None, None, None, frozenset())
         self.save_config(defaults)
@@ -393,17 +405,19 @@ class FilmRepository:
     def save_config(self, config: Config) -> None:
         self.conn.execute(
             """
-            INSERT INTO config (id, letterboxd_username, zip_code, hype_list_url, blacklisted_theaters)
-            VALUES (1, :username, :zip, :hype, :blacklist)
+            INSERT INTO config (id, letterboxd_username, zip_code, hype_list_url, blacklisted_theaters, preferred_theaters)
+            VALUES (1, :username, :zip, :hype, :blacklist, :preferred)
             ON CONFLICT(id) DO UPDATE SET
                 letterboxd_username = excluded.letterboxd_username, zip_code = excluded.zip_code,
-                hype_list_url = excluded.hype_list_url, blacklisted_theaters = excluded.blacklisted_theaters
+                hype_list_url = excluded.hype_list_url, blacklisted_theaters = excluded.blacklisted_theaters,
+                preferred_theaters = excluded.preferred_theaters
             """,
             {
                 "username": config.letterboxd_username,
                 "zip": config.zip_code,
                 "hype": config.hype_list_url,
                 "blacklist": ", ".join(sorted(config.blacklisted_theaters)),
+                "preferred": ", ".join(sorted(config.preferred_theaters)),
             },
         )
         self.conn.commit()

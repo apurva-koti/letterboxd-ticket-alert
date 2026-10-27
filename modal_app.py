@@ -30,6 +30,7 @@ def _env_config_defaults():
         zip_code=env_config.ZIP_CODE,
         hype_list_url=env_config.HYPE_LIST_URL,
         blacklisted_theaters=env_config.BLACKLISTED_THEATERS,
+        preferred_theaters=env_config.PREFERRED_THEATERS,
     )
 
 
@@ -99,6 +100,7 @@ def run_scheduler() -> None:
             cfg.zip_code,
             hype_list_url=cfg.hype_list_url,
             blacklisted_theaters=cfg.blacklisted_theaters,
+            preferred_theaters=cfg.preferred_theaters,
         )
 
         pending = repo.get_unnotified()
@@ -149,6 +151,7 @@ def config_ui():
     since there's no account system yet."""
     import os
 
+    from fandango_client import FandangoClient
     from repository import FilmRepository
     from web_app import create_app
 
@@ -163,6 +166,7 @@ def config_ui():
         os.environ["CONFIG_ACCESS_TOKEN"],
         on_saved=volume.commit,
         seed_defaults=_env_config_defaults(),
+        nearby_theaters=lambda zip_code, radius: FandangoClient().nearby_theaters(zip_code, radius),
     )
 
 

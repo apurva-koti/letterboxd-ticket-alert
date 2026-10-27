@@ -65,7 +65,7 @@ manual run if you want to check setup first.
 ## Settings
 
 After the first run, your settings (Letterboxd username, zip, Hype list,
-blacklisted theaters) live in the database, not `config.py` - `config.py`'s
+blacklisted and preferred theaters) live in the database, not `config.py` - `config.py`'s
 values are only the one-time seed. Edit them at:
 
 ```
@@ -73,7 +73,7 @@ https://<your-modal-app-url>/config/<CONFIG_ACCESS_TOKEN>
 ```
 
 The token in the URL stands in for a login - there's no account system yet
-(single-user, see "Blacklisted theaters" below), so don't share the link.
+(single-user for now), so don't share the link.
 Find your app's URL and the token with:
 
 ```bash
@@ -81,15 +81,21 @@ modal app list                       # shows the config_ui endpoint's URL
 modal secret list                    # confirms config-ui exists
 ```
 
-### Blacklisted theaters
+### Theaters
 
-Comma-separated theater names (matching Fandango's exactly, e.g. "AMC
-Mercado 20, Cinemark Century San Mateo 12") you'd never actually go to. A
-showing only at these theaters won't alert you - the alert still fires
-normally once a real theater has tickets. Updating the list also
-retroactively clears any already-sent alert that turns out to only be
-backed by blacklisted theaters now, so you'll hear about that film again
-once a real theater comes through.
+The form lists every theater Fandango has within 50 miles of your zip,
+nearest first. Mark each one Normal, Preferred, or Blacklisted.
+
+- **Blacklisted**: theaters you'd never go to. A showing only at these
+  won't alert you; the alert fires once a non-blacklisted theater has
+  tickets. Blacklisting a theater also clears any alert that was only
+  backed by blacklisted theaters, so you'll hear about that film again.
+- **Preferred**: theaters you'd rather see a film at. A film normally
+  alerts once per run in theaters. If that alert didn't include a
+  preferred theater, you get one more alert when a preferred theater has
+  tickets (e.g. Alamo first, then AMC Metreon). Until then, each check
+  looks through all of the film's showtime dates and all nearby theaters
+  for a preferred one, not just the first date's 5 nearest theaters.
 
 ### Hype
 
@@ -143,27 +149,38 @@ picked in advance.
 The moment tickets are purchasable, it emails a loud alert with the poster,
 and retries if the send fails.
 
-Tier controls how often a film gets checked, and is recomputed every check,
-so a film moves between tiers on its own as its date approaches and passes:
+Each film is always in one of three alert states:
+
+| State | What happens on a check |
+|---|---|
+| Not on sale | Alerts ("first") as soon as a non-blacklisted theater has tickets |
+| On sale, alert had no preferred theater | Searches every date for a preferred theater; alerts once more ("preferred") when one has tickets |
+| On sale, alert included a preferred theater | Nothing - no more alerts while it stays on sale |
+
+Going off sale returns a film to "not on sale", and its past alert no
+longer counts - the next time it's on sale is treated as a new run (e.g. a
+re-release) and alerts again. Saving the settings form with every theater
+from a film's alert now blacklisted does the same.
+
+Tier controls how often a film gets checked. It's recomputed after every
+check, from the Letterboxd date and whether the film is on sale, so a film
+moves between tiers on its own:
 
 | Tier | When | Checked |
 |---|---|---|
 | `must_watch` | On the Hype list | every run |
 | `hot` | Releasing within 90 days | every ~3h |
-| `recent` | Released within the last 30 days | every ~8h |
+| `recent` | Released within the last 30 days, or released longer ago but still on sale | every ~8h |
 | `far_future` / `unknown` | Releasing >90 days out, or no date yet | every ~24h |
-| `retired` | Released over 30 days ago | every ~7 days |
+| `retired` | Released over 30 days ago and no longer on sale - its run is over | every ~7 days |
 
-A `retired` or `unknown` film re-checks Letterboxd first (in case a new
+Retiring clears the film's alert history. A `retired` or `unknown` film re-checks Letterboxd first (in case a new
 release date showed up), then searches Fandango fresh regardless - a
 re-release can surface on Fandango before Letterboxd lists a new date for
 it, so neither source is trusted blindly over the other. Other tiers trust
 the anchor date they already have and skip the Letterboxd re-check, but
 still search Fandango fresh every time - nothing is cached long-term, since
 a new matching listing can appear on Fandango at any point.
-
-Documentaries are skipped entirely (Fandango doesn't track them reliably)
-unless the film is on Hype.
 
 ## Resilience
 
@@ -200,7 +217,6 @@ Runs every 15 minutes, so tolerating flaky sites matters:
 - Fandango/Letterboxd can change their HTML and silently break a parser.
   `pytest -m live` catches this, but only if you run it.
 - Fandango doesn't cover every theater, especially small/independent ones.
-- Once a film has alerted, a *second* real theater adding tickets later
-  doesn't trigger a second alert - one good alert is treated as enough.
-  `why.py` or the logs show the full live picture if you want to check
-  whether more theaters have since joined.
+- Once a film has alerted, another theater adding tickets later doesn't
+  trigger another alert - unless it's the first preferred theater (see
+  Theaters above). `why.py` or the logs show the full live picture.

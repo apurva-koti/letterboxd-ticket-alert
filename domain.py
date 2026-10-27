@@ -99,6 +99,7 @@ class Config:
     zip_code: str | None
     hype_list_url: str | None
     blacklisted_theaters: frozenset[str]
+    preferred_theaters: frozenset[str] = frozenset()
 
 
 @dataclass

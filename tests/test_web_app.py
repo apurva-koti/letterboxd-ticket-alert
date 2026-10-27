@@ -11,9 +11,12 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def _client(token="secret123", on_saved=lambda: None, on_read=lambda: None, seed_defaults=None):
+NEARBY = [("Alamo Drafthouse Cinema New Mission", 1.4), ("AMC Metreon 16", 1.8), ("AMC Mercado 20", 34.0)]
+
+
+def _client(token="secret123", on_saved=lambda: None, on_read=lambda: None, seed_defaults=None, nearby=lambda z, r: NEARBY):
     repo = FilmRepository.connect(":memory:")
-    app = create_app(repo, token, on_saved=on_saved, on_read=on_read, seed_defaults=seed_defaults)
+    app = create_app(repo, token, on_saved=on_saved, on_read=on_read, seed_defaults=seed_defaults, nearby_theaters=nearby)
     return TestClient(app), repo
 
 
@@ -49,7 +52,12 @@ def test_saving_round_trips_through_the_form():
             "letterboxd_username": "dave",
             "zip_code": "94158",
             "hype_list_url": "https://letterboxd.com/dave/list/hype/",
-            "blacklisted_theaters": "AMC Mercado 20, Cinemark Century San Mateo 12",
+            "theater_0": "Alamo Drafthouse Cinema New Mission",
+            "choice_0": "",
+            "theater_1": "AMC Metreon 16",
+            "choice_1": "preferred",
+            "theater_2": "AMC Mercado 20",
+            "choice_2": "blacklisted",
         },
         follow_redirects=False,
     )
@@ -58,11 +66,14 @@ def test_saving_round_trips_through_the_form():
 
     cfg = repo.get_config()
     assert cfg.letterboxd_username == "dave"
-    assert cfg.blacklisted_theaters == {"AMC Mercado 20", "Cinemark Century San Mateo 12"}
+    assert cfg.blacklisted_theaters == {"AMC Mercado 20"}
+    assert cfg.preferred_theaters == {"AMC Metreon 16"}
 
     resp = client.get("/config/secret123")
     assert 'value="dave"' in resp.text
-    assert "AMC Mercado 20, Cinemark Century San Mateo 12" in resp.text
+    assert 'id="choice_1_preferred" name="choice_1" value="preferred" checked' in resp.text
+    assert 'id="choice_2_blacklisted" name="choice_2" value="blacklisted" checked' in resp.text
+    assert 'id="choice_0_normal" name="choice_0" value="" checked' in resp.text
 
 
 def test_saving_blank_hype_list_clears_it_not_empty_string():
@@ -89,7 +100,7 @@ def test_saving_a_blacklist_clears_now_worthless_alerts(caplog):
     with caplog.at_level("INFO"):
         resp = client.post(
             "/config/secret123",
-            data={"letterboxd_username": "dave", "zip_code": "94158", "blacklisted_theaters": "The New Parkway"},
+            data={"letterboxd_username": "dave", "zip_code": "94158", "theater_0": "The New Parkway", "choice_0": "blacklisted"},
             follow_redirects=False,
         )
     assert resp.headers["location"] == "/config/secret123?saved=1&cleared=Singin%27%20in%20the%20Rain"
@@ -113,3 +124,33 @@ def test_save_and_read_hooks_fire():
 
     assert reads == [1]
     assert saves == [1]
+
+
+def test_form_lists_nearby_theaters_nearest_first_with_distance():
+    client, repo = _client(seed_defaults=Config("dave", "94158", None, frozenset()))
+    resp = client.get("/config/secret123")
+    assert resp.text.index("Alamo Drafthouse") < resp.text.index("AMC Metreon 16") < resp.text.index("AMC Mercado 20")
+    assert "34.0" in resp.text
+
+
+def test_saved_theater_outside_the_nearby_list_is_still_shown_and_kept():
+    """A theater saved earlier but missing from Fandango's list (renamed,
+    closed, or the zip changed) still gets a row, so re-saving the form
+    doesn't silently drop it."""
+    client, repo = _client(
+        seed_defaults=Config("dave", "94158", None, frozenset({"Old Cinema"}), preferred_theaters=frozenset({"Gone Theater"}))
+    )
+    resp = client.get("/config/secret123")
+    assert "Old Cinema" in resp.text
+    assert "Gone Theater" in resp.text
+
+
+def test_nearby_lookup_failure_still_renders_saved_theaters():
+    def boom(z, r):
+        raise Exception("fandango down")
+
+    client, _ = _client(seed_defaults=Config("dave", "94158", None, frozenset({"AMC Mercado 20"})), nearby=boom)
+    resp = client.get("/config/secret123")
+    assert resp.status_code == 200
+    assert "AMC Mercado 20" in resp.text
+    assert "Couldn" in resp.text

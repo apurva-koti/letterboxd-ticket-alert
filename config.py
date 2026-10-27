@@ -38,3 +38,7 @@ HYPE_LIST_URL = _get("HYPE_LIST_URL")  # a Letterboxd list of must-watch films -
 # never on sale at all - so a real alert still fires the moment it reaches
 # anywhere else, instead of being permanently suppressed.
 BLACKLISTED_THEATERS = frozenset(t.strip() for t in (_get("BLACKLISTED_THEATERS") or "").split(",") if t.strip())
+
+# Theaters you'd rather see a film at - same format as above. If a film's
+# alert listed none of these, you get one more alert when one goes on sale.
+PREFERRED_THEATERS = frozenset(t.strip() for t in (_get("PREFERRED_THEATERS") or "").split(",") if t.strip())
