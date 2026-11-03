@@ -284,3 +284,35 @@ def test_unknown_showtime_type_is_flagged_on_the_trace(monkeypatch):
 
     assert trace.anomalies == ["unknown showtime type 'presale' at AMC Metreon 16 2026-12-25"]
     assert trace.dates[0].theaters[0].other == ["presale ?"]
+
+
+def test_search_real_no_results_page_is_an_empty_list():
+    client = _client_with_stubbed_get(lambda url, **kw: fake_html_response("fandango_search_no_results.html"))
+    assert client.search("qzxv nonexistent film 9382") == []
+
+
+def test_search_unrecognized_page_raises_and_logs_it(caplog):
+    """Regression test: ~4h of overnight Fandango search outage read as
+    "no listing" for every film, dropping on-sale films to none - each
+    re-alerted once search came back."""
+    import pytest
+
+    page = "<html><head><title>Down for maintenance</title></head><body>We'll be right back</body></html>"
+    client = _client_with_stubbed_get(lambda url, **kw: FakeResponse(text=page))
+    with caplog.at_level("WARNING"), pytest.raises(fc.UnrecognizedSearchPage):
+        client.search("Dune: Part Three")
+    assert "title='Down for maintenance'" in caplog.text
+    assert "We'll be right back" in caplog.text
+    assert "full body: <html>" in caplog.text
+
+
+def test_search_logs_the_full_unrecognized_page_only_once_per_session(caplog):
+    import pytest
+
+    client = _client_with_stubbed_get(lambda url, **kw: FakeResponse(text="<html><body>oops</body></html>"))
+    with caplog.at_level("WARNING"):
+        for title in ["A", "B"]:
+            with pytest.raises(fc.UnrecognizedSearchPage):
+                client.search(title)
+    assert caplog.text.count("full body:") == 1
+    assert caplog.text.count("returned an unrecognized page") == 2

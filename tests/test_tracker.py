@@ -544,3 +544,26 @@ def test_raw_responses_logged_only_when_status_changes(monkeypatch, repo, caplog
         Tracker(repo, lb).run("user", "94158")  # on_sale -> on_sale
     assert "Werwulf (2026)" in caplog.text
     assert "RAWBODY" not in caplog.text
+
+
+def test_unrecognized_search_page_keeps_the_previous_status(monkeypatch, repo):
+    """An outage page isn't "not on Fandango": the film must stay on_sale
+    and be retried, not drop to none and re-alert later."""
+    import fandango_client
+
+    film, lb, fandango = _setup_werwulf(monkeypatch, repo, ["Alamo Drafthouse Cinema New Mission"])
+    Tracker(repo, lb).run("user", "94158")
+    repo.mark_notified("werwulf")
+
+    def outage(*a, **k):
+        raise fandango_client.UnrecognizedSearchPage("search for 'Werwulf': neither results nor a 'No results' page")
+
+    monkeypatch.setattr(matcher, "find_candidates", outage)
+    _make_due(repo)
+    result = Tracker(repo, lb).run("user", "94158")
+
+    assert film not in result.alerted
+    tracked = repo.get("werwulf")
+    assert tracked.status == TicketStatus.ON_SALE
+    assert tracked.notified_at is not None
+    assert tracked.next_check_at <= datetime.now(timezone.utc)  # still due: retried next run

@@ -48,6 +48,15 @@ FULL_THEATER_LIMIT = 100
 MAX_SEARCH_DATES = 21
 PAST_SHOWTIME_TYPE = "pastshowtime"
 
+class UnrecognizedSearchPage(Exception):
+    """Fandango's search returned neither results nor its own "No results"
+    page - an outage or maintenance page, or a layout change. Raised so the
+    film's check fails and is retried, instead of reading as "not on
+    Fandango" (confirmed in production: ~4h of empty searches overnight
+    dropped every on-sale film checked to none, and each re-alerted once
+    search came back - 7 duplicate emails)."""
+
+
 def _looks_blocked(resp: requests.Response) -> bool:
     return BLOCK_PAGE_MARKER in resp.text or not resp.text.strip()
 
@@ -73,6 +82,7 @@ def _extract_movie_json_ld(html: str) -> dict | None:
 
 class FandangoClient:
     def __init__(self) -> None:
+        self._logged_unrecognized_page = False
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
         self._get(BASE_URL + "/")  # visit once to pick up cookies
@@ -105,8 +115,16 @@ class FandangoClient:
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
+        panels = soup.select("li.search__panel")
+        if not panels:
+            no_results = soup.select_one(".search__no-results")
+            if no_results is None:
+                self._log_unrecognized_page(title, resp, soup)
+                raise UnrecognizedSearchPage(f"search for {title!r}: neither results nor a 'No results' page")
+            return []
+
         listings = []
-        for panel in soup.select("li.search__panel"):
+        for panel in panels:
             link = panel.select_one("a.search__movie-title")
             if not link:
                 continue
@@ -129,6 +147,19 @@ class FandangoClient:
                 )
             )
         return listings
+
+    def _log_unrecognized_page(self, title: str, resp: requests.Response, soup: BeautifulSoup) -> None:
+        page_title = soup.title.get_text(strip=True) if soup.title else None
+        text = " ".join(soup.get_text(" ", strip=True).split())[:SNIPPET_LENGTH * 5]
+        logger.warning(
+            f"Fandango search for {title!r} returned an unrecognized page: status={resp.status_code} "
+            f"length={len(resp.text)} title={page_title!r} text={text!r}"
+        )
+        # The full page once per run - enough to see what it was without
+        # logging ~100KB for every film while an outage lasts.
+        if not getattr(self, "_logged_unrecognized_page", False):
+            self._logged_unrecognized_page = True
+            logger.warning(f"Fandango unrecognized search page, full body: {resp.text}")
 
     def fetch_details(self, slug: str) -> tuple[str | None, int | None, str | None]:
         """Director, runtime, and synopsis all live in the same
