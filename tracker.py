@@ -80,6 +80,7 @@ class Tracker:
             result.added, result.removed = self.repo.sync_watchlist(list(by_slug.values()))
 
         if fandango is None:
+            result.fandango_unavailable = True
             return result
 
         processed = 0
@@ -100,8 +101,9 @@ class Tracker:
                 self._process_film(
                     fandango, film, tracked, is_hype, zip_code, blacklisted_theaters, preferred_theaters, now, result
                 )
-            except Exception:
+            except Exception as e:
                 logger.warning(f"{film.title} ({film.year}): check failed, will retry next run", exc_info=True)
+                result.failed.append(f"{film.title}: {type(e).__name__}: {e}")
 
         return result
 
@@ -284,6 +286,7 @@ class Tracker:
         logger.info(trace.format(header + "\n" + "\n".join(details), include_raw=new_status != previous_status))
 
         result.checked.append(film)
+        result.anomalies.extend(f"{film.title}: {a}" for a in trace.anomalies)
         if should_alert:
             result.alerted.append(film)
 

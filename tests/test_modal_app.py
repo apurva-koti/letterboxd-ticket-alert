@@ -35,3 +35,38 @@ def test_is_transient_failure_false_for_client_error():
 
 def test_is_transient_failure_false_for_unrelated_exception():
     assert modal_app._is_transient_failure(KeyError("boom")) is False
+
+
+def _health_setup(monkeypatch, send):
+    from datetime import datetime, timedelta, timezone
+
+    from domain import RunResult
+    from health import HealthState
+    from repository import FilmRepository
+
+    import email_alert
+
+    sent = []
+    monkeypatch.setattr(email_alert, "send_email", lambda subject, body, html=None: (send(), sent.append(subject)))
+    repo = FilmRepository.connect(":memory:")
+    t0 = datetime(2026, 11, 3, 7, 45, tzinfo=timezone.utc)
+    repo.save_health(HealthState(failing_since=t0, last_problem="x"))
+    broken = RunResult(failed=["Werwulf: UnrecognizedSearchPage: ..."])
+    return repo, broken, t0 + timedelta(hours=6), sent
+
+
+def test_check_health_emails_once_after_six_hours(monkeypatch):
+    repo, broken, now, sent = _health_setup(monkeypatch, lambda: None)
+    modal_app._check_health(repo, broken, now, "logs/2026-11-03/13-45.log")
+    modal_app._check_health(repo, broken, now, "logs/2026-11-03/14-00.log")
+    assert len(sent) == 1 and "may be missing alerts" in sent[0]
+    assert repo.get_health().alerted_at == now
+
+
+def test_check_health_retries_the_email_if_sending_fails(monkeypatch):
+    def fail():
+        raise RuntimeError("smtp down")
+
+    repo, broken, now, sent = _health_setup(monkeypatch, fail)
+    modal_app._check_health(repo, broken, now, None)
+    assert repo.get_health().alerted_at is None  # not marked sent - next run tries again

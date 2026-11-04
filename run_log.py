@@ -20,8 +20,12 @@ FORMAT = "%(asctime)s %(levelname)s %(message)s"
 RETENTION_DAYS = 30
 
 
+def relative_path(now: datetime) -> str:
+    return f"{now:%Y-%m-%d}/{now:%H-%M}.log"
+
+
 def start(log_dir: str | Path, now: datetime, logger: logging.Logger) -> logging.Handler:
-    path = Path(log_dir) / f"{now:%Y-%m-%d}" / f"{now:%H-%M}.log"
+    path = Path(log_dir) / relative_path(now)
     path.parent.mkdir(parents=True, exist_ok=True)
     handler = logging.FileHandler(path, encoding="utf-8")
     handler.setFormatter(logging.Formatter(FORMAT))

@@ -108,3 +108,6 @@ class RunResult:
     removed: list[Film] = field(default_factory=list)
     checked: list[Film] = field(default_factory=list)
     alerted: list[Film] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)  # "<title>: <error>" per film whose check raised
+    anomalies: list[str] = field(default_factory=list)  # unexpected Fandango data seen while checking
+    fandango_unavailable: bool = False

@@ -198,3 +198,21 @@ def test_mark_notified_removes_from_unnotified():
 
     r.mark_notified("a")
     assert r.get_unnotified() == []
+
+
+def test_health_state_round_trips_and_starts_empty():
+    from datetime import datetime, timezone
+
+    from health import HealthState
+
+    repo = FilmRepository.connect(":memory:")
+    assert repo.get_health() == HealthState()
+    state = HealthState(
+        failing_since=datetime(2026, 11, 3, 7, 45, tzinfo=timezone.utc),
+        last_problem="all 3 film check(s) failed",
+        alerted_at=datetime(2026, 11, 3, 13, 45, tzinfo=timezone.utc),
+    )
+    repo.save_health(state)
+    assert repo.get_health() == state
+    repo.save_health(HealthState())
+    assert repo.get_health() == HealthState()

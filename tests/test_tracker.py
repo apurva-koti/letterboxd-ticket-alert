@@ -567,3 +567,37 @@ def test_unrecognized_search_page_keeps_the_previous_status(monkeypatch, repo):
     assert tracked.status == TicketStatus.ON_SALE
     assert tracked.notified_at is not None
     assert tracked.next_check_at <= datetime.now(timezone.utc)  # still due: retried next run
+
+
+def test_run_records_failed_checks_and_unexpected_fandango_data(monkeypatch, repo):
+    import fandango_client
+
+    broken = make_film(slug="broken", title="Broken")
+    weird = make_film(slug="weird", title="Weird")
+    release = LetterboxdRelease(director=None, genres=[], poster_url=None, us_dates=[date.today() + timedelta(days=10)])
+    lb = FakeLetterboxd(watchlist=[broken, weird], releases={"broken": release, "weird": release})
+
+    def find(client, title, *a, **k):
+        if title == "Broken":
+            raise fandango_client.UnrecognizedSearchPage("search for 'Broken': neither results nor a 'No results' page")
+        return [make_listing(fandango_id="1")]
+
+    monkeypatch.setattr(matcher, "find_candidates", find)
+    fandango = FakeFandango(showtimes={"1": make_showtime_check()})
+
+    def check(fandango_id, slug, zip_code, trace=None):
+        trace.anomalies.append("unknown showtime type 'presale' at AMC Metreon 16 2026-12-25")
+        return fandango.showtimes[fandango_id]
+
+    fandango.check_showtimes = check
+    _install_fandango(monkeypatch, fandango)
+
+    result = Tracker(repo, lb).run("user", "94158")
+
+    assert result.failed == ["Broken: UnrecognizedSearchPage: search for 'Broken': neither results nor a 'No results' page"]
+    assert result.anomalies == ["Weird: digger-2026-245150: unknown showtime type 'presale' at AMC Metreon 16 2026-12-25"]
+
+
+def test_run_flags_fandango_session_failure(monkeypatch, repo):
+    monkeypatch.setattr(tracker_module, "FandangoClient", lambda: (_ for _ in ()).throw(Exception("down")))
+    assert Tracker(repo, FakeLetterboxd()).run("user", "94158").fandango_unavailable

@@ -212,6 +212,12 @@ Runs every 15 minutes, so tolerating flaky sites matters:
   checked.
 - Only actionable failures email you - a timeout or 5xx that self-heals on
   its own doesn't.
+- If Fandango checking stays broken for 6 hours - every film check failing,
+  no Fandango session, or Fandango sending showtime data the code doesn't
+  recognize - you get one email saying so (with the log file to look at),
+  and one more when checks work again. Shorter outages (Fandango's search
+  was down ~4h overnight once) don't email. This is what catches a
+  Fandango redesign, which would otherwise silently stop every alert.
 
 ## Layout
 
@@ -230,6 +236,7 @@ Runs every 15 minutes, so tolerating flaky sites matters:
 | `modal_app.py` | The deployed cron + the settings-form web endpoint |
 | `checktrace.py` | Collects what one film's check saw, logged as one block |
 | `run_log.py` | Saves each run's log to the Volume for 30 days |
+| `health.py` | Emails when Fandango checking has been broken for 6h |
 | `why.py` | Diagnostic: why is/isn't a film being tracked |
 
 ## Known limitations

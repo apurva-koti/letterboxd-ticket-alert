@@ -7,6 +7,7 @@ import sqlite3
 from datetime import date, datetime, timezone
 
 from domain import Config, FandangoListing, Film, PendingNotification, Tier, TicketStatus, TrackedFilm
+from health import HealthState
 
 DB_PATH = "state.db"
 
@@ -58,6 +59,14 @@ CREATE TABLE IF NOT EXISTS config (
     hype_list_url TEXT,
     blacklisted_theaters TEXT,
     preferred_theaters TEXT
+);
+
+-- Single row (id=1): whether Fandango checking is currently broken - see health.py.
+CREATE TABLE IF NOT EXISTS health (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    failing_since TEXT,
+    last_problem TEXT,
+    alerted_at TEXT
 );
 """
 
@@ -384,6 +393,31 @@ class FilmRepository:
                 cleared.append(Film(slug=row["slug"], title=row["title"], year=row["year"], url=row["url"]))
         self.conn.commit()
         return cleared
+
+    def get_health(self) -> HealthState:
+        row = self.conn.execute("SELECT * FROM health WHERE id = 1").fetchone()
+        if not row:
+            return HealthState()
+        return HealthState(
+            failing_since=_parse_dt(row["failing_since"]),
+            last_problem=row["last_problem"],
+            alerted_at=_parse_dt(row["alerted_at"]),
+        )
+
+    def save_health(self, state: HealthState) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO health (id, failing_since, last_problem, alerted_at) VALUES (1, :since, :problem, :alerted)
+            ON CONFLICT(id) DO UPDATE SET
+                failing_since = excluded.failing_since, last_problem = excluded.last_problem, alerted_at = excluded.alerted_at
+            """,
+            {
+                "since": state.failing_since.isoformat() if state.failing_since else None,
+                "problem": state.last_problem,
+                "alerted": state.alerted_at.isoformat() if state.alerted_at else None,
+            },
+        )
+        self.conn.commit()
 
     def get_config(self, defaults: Config | None = None) -> Config:
         """Returns the stored config, or `defaults` (seeded on first read)
