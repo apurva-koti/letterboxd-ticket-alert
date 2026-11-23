@@ -140,8 +140,8 @@ def _run_scheduler(now, log_file: str | None) -> None:
                 email_alert.send_email(subject, plain_body, html_body)
                 repo.mark_notified(notification.film.slug)
                 logger.info(
-                    f"Email sent: {notification.film.title} ({notification.film.year}) "
-                    f"theaters={notification.alerted_theaters} url={notification.ticket_url}"
+                    f"Email sent: {notification.film.title} ({notification.film.year}) - "
+                    + "; ".join(f"{l.slug}: {l.theaters}" for l in notification.listings)
                 )
             except Exception:
                 logger.exception(f"Email failed for {notification.film.title} - will retry next run")

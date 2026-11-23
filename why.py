@@ -46,10 +46,17 @@ def explain(repo: FilmRepository, film: Film, hype_slugs: set[str]) -> None:
 
     print(f"  Anchor date (Letterboxd): {tracked.anchor_date or 'none yet'}")
 
-    if tracked.fandango:
-        print(f"  Fandango: {tracked.fandango.title} ({tracked.fandango.year}) -> {tracked.fandango.slug}")
+    if tracked.listings:
+        print(f"  Fandango listings ({len(tracked.listings)}):")
+        for listing in tracked.listings:
+            dates = f"{listing.dates[0]:%m-%d} .. {listing.dates[-1]:%m-%d}" if listing.dates else "no dates"
+            print(f"    {listing.title} ({listing.year}) -> {listing.slug}  [{dates}]")
+            if listing.on_sale_theaters:
+                print(f"      on sale: {', '.join(listing.on_sale_theaters)}")
+            if listing.showtimes_only_theaters:
+                print(f"      listed, not bookable: {', '.join(listing.showtimes_only_theaters)}")
     else:
-        print("  No Fandango listing bound.")
+        print("  No matching Fandango listings.")
 
     print(f"  Status: {tracked.status}")
     if tracked.on_sale_theaters:

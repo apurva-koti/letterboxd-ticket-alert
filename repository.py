@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import date, datetime, timezone
 
-from domain import Config, FandangoListing, Film, PendingNotification, Tier, TicketStatus, TrackedFilm
+from domain import AlertContext, AlertedListing, Config, Film, ListingResult, PendingNotification, Tier, TicketStatus, TrackedFilm
 from health import HealthState
 
 DB_PATH = "state.db"
@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS films (
     last_seen TEXT NOT NULL
 );
 
+-- Film-level data from matching. Its fandango_* / matched_* columns are
+-- from when a film had a single listing - no longer written; only read to
+-- fill in an alert saved before film_listings existed.
 CREATE TABLE IF NOT EXISTS fandango_matches (
     letterboxd_slug TEXT PRIMARY KEY REFERENCES films(slug),
     fandango_id TEXT,
@@ -36,6 +39,21 @@ CREATE TABLE IF NOT EXISTS fandango_matches (
     poster_url TEXT
 );
 
+-- Every Fandango listing matched to a film, with what its latest check
+-- found. Replaced wholesale on every check.
+CREATE TABLE IF NOT EXISTS film_listings (
+    letterboxd_slug TEXT NOT NULL REFERENCES films(slug),
+    fandango_slug TEXT NOT NULL,
+    fandango_id TEXT NOT NULL,
+    title TEXT,
+    year INTEGER,
+    dates TEXT,
+    on_sale_theaters TEXT,
+    showtimes_only_theaters TEXT,
+    checked_at TEXT NOT NULL,
+    PRIMARY KEY (letterboxd_slug, fandango_slug)
+);
+
 CREATE TABLE IF NOT EXISTS ticket_status (
     letterboxd_slug TEXT PRIMARY KEY REFERENCES films(slug),
     status TEXT NOT NULL,
@@ -45,6 +63,8 @@ CREATE TABLE IF NOT EXISTS ticket_status (
     updated_at TEXT NOT NULL,
     alerted_at TEXT,
     alerted_theaters TEXT,
+    alerted_listings TEXT,
+    alert_context TEXT,
     tier TEXT,
     next_check_at TEXT,
     notified_at TEXT
@@ -77,6 +97,8 @@ MIGRATIONS = [
     "ALTER TABLE fandango_matches ADD COLUMN runtime INTEGER",
     "ALTER TABLE ticket_status ADD COLUMN alerted_theaters TEXT",
     "ALTER TABLE config ADD COLUMN preferred_theaters TEXT",
+    "ALTER TABLE ticket_status ADD COLUMN alerted_listings TEXT",
+    "ALTER TABLE ticket_status ADD COLUMN alert_context TEXT",
 ]
 
 
@@ -90,6 +112,54 @@ def _parse_dt(value: str | None) -> datetime | None:
 
 def _parse_date(value: str | None) -> date | None:
     return date.fromisoformat(value) if value else None
+
+
+def _dates_json(dates: list[date]) -> str:
+    return json.dumps([d.isoformat() for d in dates])
+
+
+def _parse_dates(raw: str | None) -> list[date]:
+    return [date.fromisoformat(d) for d in json.loads(raw)] if raw else []
+
+
+def _alerted_listings_json(listings: list[AlertedListing]) -> str:
+    return json.dumps(
+        [{"slug": l.slug, "title": l.title, "dates": [d.isoformat() for d in l.dates], "theaters": l.theaters} for l in listings]
+    )
+
+
+def _alert_context_json(context: AlertContext) -> str:
+    return json.dumps(
+        {
+            "kind": context.kind,
+            "preferred_on_sale": context.preferred_on_sale,
+            "preferred_missing": context.preferred_missing,
+            "previous_theaters": context.previous_theaters,
+            "previous_alerted_at": context.previous_alerted_at.isoformat() if context.previous_alerted_at else None,
+        }
+    )
+
+
+def _parse_alert_context(raw: str | None) -> AlertContext | None:
+    if not raw:
+        return None
+    d = json.loads(raw)
+    return AlertContext(
+        kind=d["kind"],
+        preferred_on_sale=d["preferred_on_sale"],
+        preferred_missing=d["preferred_missing"],
+        previous_theaters=d["previous_theaters"],
+        previous_alerted_at=_parse_dt(d["previous_alerted_at"]),
+    )
+
+
+def _parse_alerted_listings(raw: str | None) -> list[AlertedListing]:
+    if not raw:
+        return []
+    return [
+        AlertedListing(slug=l["slug"], title=l["title"], dates=[date.fromisoformat(d) for d in l["dates"]], theaters=l["theaters"])
+        for l in json.loads(raw)
+    ]
 
 
 class FilmRepository:
@@ -141,6 +211,7 @@ class FilmRepository:
         for f in removed:
             self.conn.execute("DELETE FROM films WHERE slug = ?", (f.slug,))
             self.conn.execute("DELETE FROM fandango_matches WHERE letterboxd_slug = ?", (f.slug,))
+            self.conn.execute("DELETE FROM film_listings WHERE letterboxd_slug = ?", (f.slug,))
             self.conn.execute("DELETE FROM ticket_status WHERE letterboxd_slug = ?", (f.slug,))
 
         self.conn.commit()
@@ -161,7 +232,6 @@ class FilmRepository:
         match_row = self.conn.execute("SELECT * FROM fandango_matches WHERE letterboxd_slug = ?", (slug,)).fetchone()
         status_row = self.conn.execute("SELECT * FROM ticket_status WHERE letterboxd_slug = ?", (slug,)).fetchone()
 
-        fandango = None
         anchor_date = None
         director = None
         runtime = None
@@ -175,19 +245,12 @@ class FilmRepository:
             excluded_reason = match_row["excluded_reason"]
             poster_url = match_row["poster_url"]
             checked_at = _parse_dt(match_row["checked_at"])
-            if match_row["fandango_id"]:
-                fandango = FandangoListing(
-                    fandango_id=match_row["fandango_id"],
-                    slug=match_row["fandango_slug"],
-                    title=match_row["matched_title"],
-                    year=match_row["matched_year"],
-                    url=f"https://www.fandango.com/{match_row['fandango_slug']}/movie-overview",
-                )
 
         status = TicketStatus.NONE
         on_sale_theaters: list[str] = []
         showtimes_only_theaters: list[str] = []
         alerted_theaters: list[str] = []
+        alerted_listings: list[AlertedListing] = []
         tier = None
         next_check_at = None
         alerted_at = None
@@ -199,6 +262,7 @@ class FilmRepository:
                 json.loads(status_row["showtimes_only_theaters"]) if status_row["showtimes_only_theaters"] else []
             )
             alerted_theaters = json.loads(status_row["alerted_theaters"]) if status_row["alerted_theaters"] else []
+            alerted_listings = _parse_alerted_listings(status_row["alerted_listings"])
             tier = Tier(status_row["tier"]) if status_row["tier"] else None
             next_check_at = _parse_dt(status_row["next_check_at"])
             alerted_at = _parse_dt(status_row["alerted_at"])
@@ -209,13 +273,14 @@ class FilmRepository:
             anchor_date=anchor_date,
             director=director,
             runtime=runtime,
-            fandango=fandango,
+            listings=self.get_listings(slug),
             poster_url=poster_url,
             excluded_reason=excluded_reason,
             status=status,
             on_sale_theaters=on_sale_theaters,
             showtimes_only_theaters=showtimes_only_theaters,
             alerted_theaters=alerted_theaters,
+            alerted_listings=alerted_listings,
             tier=tier,
             next_check_at=next_check_at,
             alerted_at=alerted_at,
@@ -223,10 +288,46 @@ class FilmRepository:
             checked_at=checked_at,
         )
 
+    def get_listings(self, slug: str) -> list[ListingResult]:
+        rows = self.conn.execute(
+            "SELECT * FROM film_listings WHERE letterboxd_slug = ? ORDER BY rowid", (slug,)
+        ).fetchall()
+        return [
+            ListingResult(
+                fandango_id=r["fandango_id"],
+                slug=r["fandango_slug"],
+                title=r["title"],
+                year=r["year"],
+                dates=_parse_dates(r["dates"]),
+                on_sale_theaters=json.loads(r["on_sale_theaters"]) if r["on_sale_theaters"] else [],
+                showtimes_only_theaters=json.loads(r["showtimes_only_theaters"]) if r["showtimes_only_theaters"] else [],
+            )
+            for r in rows
+        ]
+
+    def save_listings(self, slug: str, listings: list[ListingResult]) -> None:
+        """Replaces the film's listings with this check's - a listing that no
+        longer matches simply disappears."""
+        now = _now()
+        self.conn.execute("DELETE FROM film_listings WHERE letterboxd_slug = ?", (slug,))
+        for l in listings:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO film_listings
+                    (letterboxd_slug, fandango_slug, fandango_id, title, year, dates,
+                     on_sale_theaters, showtimes_only_theaters, checked_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    slug, l.slug, l.fandango_id, l.title, l.year, _dates_json(l.dates),
+                    json.dumps(l.on_sale_theaters), json.dumps(l.showtimes_only_theaters), now,
+                ),
+            )
+        self.conn.commit()
+
     def save_match(
         self,
         slug: str,
-        fandango: FandangoListing | None,
         anchor_date: date | None,
         director: str | None = None,
         runtime: int | None = None,
@@ -236,22 +337,15 @@ class FilmRepository:
         self.conn.execute(
             """
             INSERT INTO fandango_matches
-                (letterboxd_slug, fandango_id, fandango_slug, matched_title, matched_year,
-                 release_date, release_date_source, director, runtime, excluded_reason, poster_url, checked_at)
-            VALUES (:slug, :fid, :fslug, :title, :year, :date, :source, :director, :runtime, :excluded, :poster, :now)
+                (letterboxd_slug, release_date, release_date_source, director, runtime, excluded_reason, poster_url, checked_at)
+            VALUES (:slug, :date, :source, :director, :runtime, :excluded, :poster, :now)
             ON CONFLICT(letterboxd_slug) DO UPDATE SET
-                fandango_id = excluded.fandango_id, fandango_slug = excluded.fandango_slug,
-                matched_title = excluded.matched_title, matched_year = excluded.matched_year,
                 release_date = excluded.release_date, release_date_source = excluded.release_date_source,
                 director = excluded.director, runtime = excluded.runtime, excluded_reason = excluded.excluded_reason,
                 poster_url = excluded.poster_url, checked_at = excluded.checked_at
             """,
             {
                 "slug": slug,
-                "fid": fandango.fandango_id if fandango else None,
-                "fslug": fandango.slug if fandango else None,
-                "title": fandango.title if fandango else None,
-                "year": fandango.year if fandango else None,
                 "date": anchor_date.isoformat() if anchor_date else None,
                 "source": "letterboxd" if anchor_date else None,
                 "director": director,
@@ -274,6 +368,8 @@ class FilmRepository:
         tier: Tier,
         next_check_at: datetime,
         alerted_theaters: list[str] | None = None,
+        alerted_listings: list[AlertedListing] | None = None,
+        alert_context: AlertContext | None = None,
     ) -> None:
         """`on_sale_theaters` is the full live picture as of this check -
         always overwritten, purely for display/diagnostics (why.py). It is
@@ -289,8 +385,9 @@ class FilmRepository:
             """
             INSERT INTO ticket_status
                 (letterboxd_slug, status, status_date, on_sale_theaters, showtimes_only_theaters,
-                 updated_at, alerted_at, alerted_theaters, tier, next_check_at)
-            VALUES (:slug, :status, :date, :on_sale, :showtimes_only, :now, :alerted_at, :alerted_theaters, :tier, :next_check)
+                 updated_at, alerted_at, alerted_theaters, alerted_listings, alert_context, tier, next_check_at)
+            VALUES (:slug, :status, :date, :on_sale, :showtimes_only, :now, :alerted_at, :alerted_theaters, :alerted_listings,
+                    :alert_context, :tier, :next_check)
             ON CONFLICT(letterboxd_slug) DO UPDATE SET
                 status = excluded.status, status_date = excluded.status_date,
                 on_sale_theaters = excluded.on_sale_theaters, showtimes_only_theaters = excluded.showtimes_only_theaters,
@@ -298,6 +395,12 @@ class FilmRepository:
                 alerted_at = CASE WHEN excluded.alerted_at IS NOT NULL THEN excluded.alerted_at ELSE ticket_status.alerted_at END,
                 alerted_theaters = CASE
                     WHEN excluded.alerted_at IS NOT NULL THEN excluded.alerted_theaters ELSE ticket_status.alerted_theaters
+                END,
+                alerted_listings = CASE
+                    WHEN excluded.alerted_at IS NOT NULL THEN excluded.alerted_listings ELSE ticket_status.alerted_listings
+                END,
+                alert_context = CASE
+                    WHEN excluded.alerted_at IS NOT NULL THEN excluded.alert_context ELSE ticket_status.alert_context
                 END,
                 notified_at = CASE
                     WHEN excluded.status != 'on_sale' OR excluded.alerted_at IS NOT NULL THEN NULL ELSE ticket_status.notified_at
@@ -313,6 +416,8 @@ class FilmRepository:
                 "now": _now(),
                 "alerted_at": _now() if alerted else None,
                 "alerted_theaters": json.dumps(alerted_theaters) if alerted_theaters else None,
+                "alerted_listings": _alerted_listings_json(alerted_listings) if alerted_listings else None,
+                "alert_context": _alert_context_json(alert_context) if alert_context else None,
                 "tier": tier.value,
                 "next_check": next_check_at.isoformat(),
             },
@@ -321,7 +426,9 @@ class FilmRepository:
 
     def clear_alert_history(self, slug: str) -> None:
         self.conn.execute(
-            "UPDATE ticket_status SET alerted_at = NULL, alerted_theaters = NULL, notified_at = NULL WHERE letterboxd_slug = ?",
+            "UPDATE ticket_status SET alerted_at = NULL, alerted_theaters = NULL, alerted_listings = NULL, alert_context = NULL, "
+            "notified_at = NULL "
+            "WHERE letterboxd_slug = ?",
             (slug,),
         )
         self.conn.commit()
@@ -334,7 +441,8 @@ class FilmRepository:
         rows = self.conn.execute(
             """
             SELECT films.slug, films.title, films.year, films.url,
-                   ticket_status.alerted_theaters, fandango_matches.fandango_slug, fandango_matches.poster_url
+                   ticket_status.alerted_theaters, ticket_status.alerted_listings, ticket_status.alert_context,
+                   fandango_matches.fandango_slug, fandango_matches.matched_title, fandango_matches.poster_url
             FROM ticket_status
             JOIN films ON films.slug = ticket_status.letterboxd_slug
             LEFT JOIN fandango_matches ON fandango_matches.letterboxd_slug = ticket_status.letterboxd_slug
@@ -344,9 +452,9 @@ class FilmRepository:
         return [
             PendingNotification(
                 film=Film(slug=row["slug"], title=row["title"], year=row["year"], url=row["url"]),
-                alerted_theaters=json.loads(row["alerted_theaters"]) if row["alerted_theaters"] else [],
-                ticket_url=f"https://www.fandango.com/{row['fandango_slug']}/movie-overview" if row["fandango_slug"] else row["url"],
+                listings=_parse_alerted_listings(row["alerted_listings"]) or _legacy_alerted_listing(row),
                 poster_url=row["poster_url"],
+                context=_parse_alert_context(row["alert_context"]),
             )
             for row in rows
         ]
@@ -385,7 +493,8 @@ class FilmRepository:
             if theaters and not (theaters - blacklisted_theaters):
                 self.conn.execute(
                     """
-                    UPDATE ticket_status SET status = 'none', alerted_at = NULL, alerted_theaters = NULL, notified_at = NULL
+                    UPDATE ticket_status SET status = 'none', alerted_at = NULL, alerted_theaters = NULL,
+                        alerted_listings = NULL, alert_context = NULL, notified_at = NULL
                     WHERE letterboxd_slug = ?
                     """,
                     (row["slug"],),
@@ -459,3 +568,12 @@ class FilmRepository:
 
 def _parse_theater_list(raw: str | None) -> frozenset[str]:
     return frozenset(t.strip() for t in (raw or "").split(",") if t.strip())
+
+
+def _legacy_alerted_listing(row: sqlite3.Row) -> list[AlertedListing]:
+    """An alert saved before per-listing snapshots existed: its theaters,
+    under the single listing that was stored back then."""
+    theaters = json.loads(row["alerted_theaters"]) if row["alerted_theaters"] else []
+    if not row["fandango_slug"]:
+        return [AlertedListing(slug="", title=row["title"], dates=[], theaters=theaters)] if theaters else []
+    return [AlertedListing(slug=row["fandango_slug"], title=row["matched_title"] or row["title"], dates=[], theaters=theaters)]

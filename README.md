@@ -165,7 +165,12 @@ rarely just one "right" listing for a re-release, so no single one is
 picked in advance.
 
 The moment tickets are purchasable, it emails a loud alert with the poster,
-and retries if the send fails.
+and retries if the send fails. A film's showings can be split across
+several Fandango listings (the original plus an anniversary re-release,
+say); the email has a section per listing with its own dates and link,
+since each listing's Fandango page only shows its own theaters. The end
+of the email says what, if anything, will send another one - e.g. which
+preferred theaters it's still watching for.
 
 Each film is always in one of three alert states:
 

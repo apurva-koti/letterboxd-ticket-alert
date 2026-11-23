@@ -59,6 +59,52 @@ class ShowtimeCheck:
 
 
 @dataclass
+class ListingResult:
+    """One matching Fandango listing and what its latest check found. A film
+    can have several (an original listing plus a separate anniversary
+    re-release listing, say), and each is stored and emailed on its own."""
+
+    fandango_id: str
+    slug: str
+    title: str
+    year: int | None
+    dates: list[date] = field(default_factory=list)  # Fandango's showtime calendar for this listing
+    on_sale_theaters: list[str] = field(default_factory=list)
+    showtimes_only_theaters: list[str] = field(default_factory=list)
+
+    @property
+    def url(self) -> str:
+        return f"https://www.fandango.com/{self.slug}/movie-overview"
+
+
+@dataclass
+class AlertedListing:
+    """What an alert told you about one listing, frozen when the alert fired -
+    the email's section for that listing."""
+
+    slug: str
+    title: str
+    dates: list[date]
+    theaters: list[str]
+
+    @property
+    def url(self) -> str | None:
+        return f"https://www.fandango.com/{self.slug}/movie-overview" if self.slug else None
+
+
+@dataclass
+class AlertContext:
+    """Why an alert fired and what can still trigger another - so the email
+    can say what to expect next. Frozen with the alert."""
+
+    kind: str  # "first" (just went on sale) or "preferred" (a preferred theater joined later)
+    preferred_on_sale: list[str] = field(default_factory=list)
+    preferred_missing: list[str] = field(default_factory=list)  # preferred theaters without tickets yet
+    previous_theaters: list[str] = field(default_factory=list)  # "preferred" only: what the earlier email listed
+    previous_alerted_at: datetime | None = None
+
+
+@dataclass
 class TrackedFilm:
     """The full persisted state for one film - a joined view of the films,
     fandango_matches, and ticket_status rows."""
@@ -67,13 +113,14 @@ class TrackedFilm:
     anchor_date: date | None
     director: str | None
     runtime: int | None
-    fandango: FandangoListing | None
+    listings: list[ListingResult]
     poster_url: str | None
     excluded_reason: str | None
     status: TicketStatus
     on_sale_theaters: list[str]
     showtimes_only_theaters: list[str]
     alerted_theaters: list[str]
+    alerted_listings: list[AlertedListing]
     tier: Tier | None
     next_check_at: datetime | None
     alerted_at: datetime | None
@@ -84,9 +131,13 @@ class TrackedFilm:
 @dataclass
 class PendingNotification:
     film: Film
-    alerted_theaters: list[str]
-    ticket_url: str | None
+    listings: list[AlertedListing]
     poster_url: str | None = None
+    context: AlertContext | None = None
+
+    @property
+    def alerted_theaters(self) -> list[str]:
+        return sorted({t for listing in self.listings for t in listing.theaters})
 
 
 @dataclass

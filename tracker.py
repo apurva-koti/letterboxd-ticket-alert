@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 
 import matcher
 from checktrace import CheckTrace
-from domain import Film, RunResult, Tier, TicketStatus, TrackedFilm
+from domain import AlertContext, AlertedListing, Film, ListingResult, RunResult, Tier, TicketStatus, TrackedFilm
 from fandango_client import FandangoClient
 from letterboxd_client import LetterboxdClient, pick_anchor
 from repository import FilmRepository
@@ -49,6 +49,18 @@ def _humanize(days: int) -> str:
     if days >= 30:
         return f"~{days // 30}mo"
     return f"{days}d"
+
+
+def _alerted_listings(listings: list[ListingResult], blacklisted_theaters: frozenset[str]) -> list[AlertedListing]:
+    """One email section per listing with something on sale (blacklist
+    applied), each with its own link and dates - theaters on an
+    anniversary listing and the original listing don't share a page."""
+    snapshot = []
+    for l in listings:
+        theaters = sorted(set(l.on_sale_theaters) - blacklisted_theaters)
+        if theaters:
+            snapshot.append(AlertedListing(slug=l.slug, title=l.title, dates=l.dates, theaters=theaters))
+    return snapshot
 
 
 class Tracker:
@@ -137,6 +149,7 @@ class Tracker:
             poster_url,
             tracked.status,
             tracked.alerted_theaters,
+            tracked.alerted_at,
             is_hype,
             anchor,
             today,
@@ -166,6 +179,7 @@ class Tracker:
         poster_url: str | None,
         previous_status: TicketStatus,
         previous_alerted_theaters: list[str],
+        previous_alerted_at: datetime | None,
         is_hype: bool,
         anchor: date | None,
         today: date,
@@ -183,18 +197,25 @@ class Tracker:
         trace = CheckTrace()
         candidates = matcher.find_candidates(fandango, film.title, director, runtime, film.year, trace=trace)
 
-        on_sale, showtimes_only, active = set(), set(), None
+        listings: list[ListingResult] = []
         for c in candidates:
             candidate_trace = trace.candidate(c.slug)
             if candidate_trace.keep is None:
                 candidate_trace.keep, candidate_trace.reason = True, "kept"
             check = fandango.check_showtimes(c.fandango_id, c.slug, zip_code, trace=candidate_trace)
-            if not check:
-                continue
-            on_sale.update(check.on_sale_theaters)
-            showtimes_only.update(check.showtimes_only_theaters)
-            if active is None or check.status == TicketStatus.ON_SALE:
-                active = c
+            listings.append(
+                ListingResult(
+                    fandango_id=c.fandango_id,
+                    slug=c.slug,
+                    title=c.title,
+                    year=c.year,
+                    dates=list(candidate_trace.calendar or []),
+                    on_sale_theaters=list(check.on_sale_theaters) if check else [],
+                    showtimes_only_theaters=list(check.showtimes_only_theaters) if check else [],
+                )
+            )
+        on_sale = {t for l in listings for t in l.on_sale_theaters}
+        showtimes_only = {t for l in listings for t in l.showtimes_only_theaters}
 
         # When the film is (or is about to be) on sale but no preferred
         # theater has been seen yet, look past the first date and past the
@@ -207,10 +228,11 @@ class Tracker:
         )
         if preferred_theaters and not alerted_preferred and not ((on_sale - blacklisted_theaters) & preferred_theaters):
             if (on_sale - blacklisted_theaters) or previous_status == TicketStatus.ON_SALE:
-                for c in candidates:
+                for listing in listings:
                     found = fandango.find_on_sale_at(
-                        c.fandango_id, c.slug, zip_code, preferred_theaters, trace=trace.candidate(c.slug)
+                        listing.fandango_id, listing.slug, zip_code, preferred_theaters, trace=trace.candidate(listing.slug)
                     )
+                    listing.on_sale_theaters = sorted(set(listing.on_sale_theaters) | found)
                     on_sale.update(found)
 
         # A showing only at a blacklisted theater is treated as if it were
@@ -243,7 +265,8 @@ class Tracker:
         tier = compute_tier(anchor, today, is_hype, on_sale=new_status == TicketStatus.ON_SALE)
         clear_history = tier == Tier.RETIRED and bool(previous_alerted_theaters)
 
-        self.repo.save_match(film.slug, active, anchor, director=director, runtime=runtime, poster_url=poster_url)
+        self.repo.save_match(film.slug, anchor, director=director, runtime=runtime, poster_url=poster_url)
+        self.repo.save_listings(film.slug, listings)
         self.repo.save_status(
             film.slug,
             new_status,
@@ -254,6 +277,18 @@ class Tracker:
             tier,
             next_check_at(tier, now),
             alerted_theaters=sorted(alertable_on_sale) if should_alert else None,
+            alerted_listings=_alerted_listings(listings, blacklisted_theaters) if should_alert else None,
+            alert_context=(
+                AlertContext(
+                    kind="preferred" if upgrade_alert else "first",
+                    preferred_on_sale=sorted(preferred_on_sale),
+                    preferred_missing=sorted(preferred_theaters - preferred_on_sale),
+                    previous_theaters=sorted(previous_alerted_theaters) if upgrade_alert else [],
+                    previous_alerted_at=previous_alerted_at if upgrade_alert else None,
+                )
+                if should_alert
+                else None
+            ),
         )
         if clear_history:
             self.repo.clear_alert_history(film.slug)

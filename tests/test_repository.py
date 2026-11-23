@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from domain import Config, Tier, TicketStatus
+from domain import AlertedListing, ListingResult, Config, Tier, TicketStatus
 from repository import FilmRepository
 
 from conftest import make_film, make_listing
@@ -121,11 +121,13 @@ def test_sync_watchlist_reports_added_and_removed():
 def test_sync_watchlist_removal_cascades_to_match_and_status():
     r = repo()
     r.sync_watchlist([make_film(slug="a")])
-    r.save_match("a", make_listing(), date(2026, 1, 1))
+    r.save_match("a", date(2026, 1, 1))
+    r.save_listings("a", [ListingResult(fandango_id="1", slug="a-1", title="A", year=2026, on_sale_theaters=["Theater"])])
     r.save_status("a", TicketStatus.ON_SALE, date(2026, 1, 1), ["Theater"], [], True, Tier.HOT, datetime.now(timezone.utc))
 
     r.sync_watchlist([])
     assert r.get("a") is None
+    assert r.get_listings("a") == []
 
 
 def test_get_returns_none_for_untracked_slug():
@@ -137,21 +139,65 @@ def test_get_returns_defaults_for_never_processed_film():
     r.sync_watchlist([make_film(slug="a")])
     tracked = r.get("a")
     assert tracked.anchor_date is None
-    assert tracked.fandango is None
+    assert tracked.listings == []
     assert tracked.status == TicketStatus.NONE
     assert tracked.tier is None
     assert tracked.next_check_at is None
 
 
-def test_save_match_round_trips_fandango_listing():
+def test_save_match_round_trips_film_level_data():
     r = repo()
     r.sync_watchlist([make_film(slug="a")])
-    r.save_match("a", make_listing(fandango_id="999", slug="some-slug"), date(2026, 5, 1), poster_url="http://x/p.jpg")
+    r.save_match("a", date(2026, 5, 1), poster_url="http://x/p.jpg")
 
     tracked = r.get("a")
-    assert tracked.fandango.fandango_id == "999"
     assert tracked.anchor_date == date(2026, 5, 1)
     assert tracked.poster_url == "http://x/p.jpg"
+
+
+def test_every_listing_round_trips_and_is_replaced_each_check():
+    r = repo()
+    r.sync_watchlist([make_film(slug="iawl")])
+    anniversary = ListingResult(
+        fandango_id="244296", slug="its-a-wonderful-life-80th-anniversary-244296",
+        title="It's A Wonderful Life 80th Anniversary", year=None,
+        dates=[date(2026, 12, 18), date(2026, 12, 24)], on_sale_theaters=["AMC Metreon 16"],
+    )
+    original = ListingResult(
+        fandango_id="14197", slug="its-a-wonderful-life-1946-14197", title="It's a Wonderful Life", year=1946,
+        dates=[date(2026, 12, 13)], on_sale_theaters=["Lark Theater"], showtimes_only_theaters=["Somewhere"],
+    )
+    r.save_listings("iawl", [anniversary, original])
+    assert r.get("iawl").listings == [anniversary, original]
+
+    r.save_listings("iawl", [original])
+    assert r.get("iawl").listings == [original]
+
+
+def test_alerted_listings_are_frozen_like_alerted_theaters():
+    r = repo()
+    r.sync_watchlist([make_film(slug="a")])
+    now = datetime.now(timezone.utc)
+    snapshot = [AlertedListing(slug="a-1", title="A", dates=[date(2026, 12, 18)], theaters=["AMC Metreon 16"])]
+    r.save_status("a", TicketStatus.ON_SALE, None, ["AMC Metreon 16"], [], True, Tier.HOT, now,
+                  alerted_theaters=["AMC Metreon 16"], alerted_listings=snapshot)
+    r.save_status("a", TicketStatus.ON_SALE, None, ["AMC Metreon 16", "X"], [], False, Tier.HOT, now)
+
+    assert r.get("a").alerted_listings == snapshot
+    assert r.get_unnotified()[0].listings == snapshot
+
+
+def test_alert_saved_before_listings_existed_uses_the_old_single_listing():
+    r = repo()
+    r.sync_watchlist([make_film(slug="a", title="A")])
+    r.save_match("a", date(2026, 1, 1))
+    r.conn.execute(
+        "UPDATE fandango_matches SET fandango_slug = 'a-old-123', matched_title = 'A (Old Listing)' WHERE letterboxd_slug = 'a'"
+    )
+    r.save_status("a", TicketStatus.ON_SALE, None, ["X"], [], True, Tier.HOT, datetime.now(timezone.utc), alerted_theaters=["X"])
+
+    [pending] = r.get_unnotified()
+    assert pending.listings == [AlertedListing(slug="a-old-123", title="A (Old Listing)", dates=[], theaters=["X"])]
 
 
 def test_save_status_clears_notified_at_when_status_leaves_on_sale():
@@ -180,7 +226,7 @@ def test_save_status_preserves_alerted_at_across_unrelated_calls():
 def test_get_unnotified_only_returns_on_sale_without_notification():
     r = repo()
     r.sync_watchlist([make_film(slug="a"), make_film(slug="b")])
-    r.save_match("a", make_listing(slug="a-slug"), date(2026, 1, 1))
+    r.save_match("a", date(2026, 1, 1))
     now = datetime.now(timezone.utc)
     r.save_status("a", TicketStatus.ON_SALE, date(2026, 1, 1), ["Theater A"], [], True, Tier.HOT, now, alerted_theaters=["Theater A"])
     r.save_status("b", TicketStatus.SHOWTIMES_ANNOUNCED, date(2026, 1, 1), [], ["Theater B"], False, Tier.HOT, now)
@@ -193,7 +239,7 @@ def test_get_unnotified_only_returns_on_sale_without_notification():
 def test_mark_notified_removes_from_unnotified():
     r = repo()
     r.sync_watchlist([make_film(slug="a")])
-    r.save_match("a", make_listing(), date(2026, 1, 1))
+    r.save_match("a", date(2026, 1, 1))
     r.save_status("a", TicketStatus.ON_SALE, date(2026, 1, 1), ["X"], [], True, Tier.HOT, datetime.now(timezone.utc))
 
     r.mark_notified("a")

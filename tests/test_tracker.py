@@ -92,7 +92,7 @@ def test_run_matches_and_checks_a_new_upcoming_film(monkeypatch, repo):
     assert film in result.checked
     assert film in result.alerted
     tracked = repo.get("digger-2026")
-    assert tracked.fandango.fandango_id == "245150"
+    assert [l.fandango_id for l in tracked.listings] == ["245150"]
     assert tracked.alerted_theaters == ["Alamo Drafthouse"]
     assert tracked.status == TicketStatus.ON_SALE
 
@@ -199,7 +199,7 @@ def test_unmatched_film_is_rescheduled_not_starved(monkeypatch, repo):
     Tracker(repo, lb).run("user", "94158")
 
     tracked = repo.get("obscure-film")
-    assert tracked.fandango is None
+    assert tracked.listings == []
     assert tracked.next_check_at is not None
     assert tracked.next_check_at > datetime.now(timezone.utc)
 
@@ -207,7 +207,7 @@ def test_unmatched_film_is_rescheduled_not_starved(monkeypatch, repo):
 def test_retired_film_drops_fandango_binding_and_resets_status(monkeypatch, repo):
     film = make_film(slug="old-film")
     repo.sync_watchlist([film])
-    repo.save_match("old-film", make_listing(), date.today() - timedelta(days=100))
+    repo.save_match("old-film", date.today() - timedelta(days=100))
     repo.save_status("old-film", TicketStatus.NONE, None, [], [], False, Tier.RECENT, datetime.now(timezone.utc) - timedelta(hours=1))
 
     release = LetterboxdRelease(director=None, genres=[], poster_url=None, us_dates=[date.today() - timedelta(days=100)])
@@ -217,7 +217,7 @@ def test_retired_film_drops_fandango_binding_and_resets_status(monkeypatch, repo
     Tracker(repo, lb).run("user", "94158")
 
     tracked = repo.get("old-film")
-    assert tracked.fandango is None
+    assert tracked.listings == []
     assert tracked.tier.value == "retired"
 
 
@@ -227,7 +227,7 @@ def test_retired_film_picks_up_a_new_anchor_and_rematches(monkeypatch, repo):
     resume normal polling."""
     film = make_film(slug="moonlight-2016", title="Moonlight")
     repo.sync_watchlist([film])
-    repo.save_match("moonlight-2016", None, date(2016, 10, 21))
+    repo.save_match("moonlight-2016", date(2016, 10, 21))
     repo.save_status(
         "moonlight-2016", TicketStatus.NONE, None, [], [], False, Tier.RETIRED, datetime.now(timezone.utc) - timedelta(hours=1)
     )
@@ -244,7 +244,7 @@ def test_retired_film_picks_up_a_new_anchor_and_rematches(monkeypatch, repo):
     result = Tracker(repo, lb).run("user", "94158")
 
     tracked = repo.get("moonlight-2016")
-    assert tracked.fandango.fandango_id == "999"
+    assert [l.fandango_id for l in tracked.listings] == ["999"]
     assert film in result.alerted  # fresh binding, none -> on_sale
 
 
@@ -269,7 +269,7 @@ def test_hype_film_bypasses_the_cap(monkeypatch, repo):
 
     Tracker(repo, lb).run("user", "94158", hype_list_url="https://letterboxd.com/x/list/hype/")
 
-    assert repo.get("dune-part-three").fandango is not None
+    assert repo.get("dune-part-three").listings != []
 
 
 def test_watchlist_fetch_failure_does_not_crash_run(monkeypatch, repo):
@@ -515,7 +515,7 @@ def test_film_flagged_by_the_old_documentary_exclusion_is_checked_and_unflagged(
     kept their stored flag and were still skipped every run."""
     film = make_film(slug="nuisance-bear", title="Nuisance Bear")
     repo.sync_watchlist([film])
-    repo.save_match("nuisance-bear", None, None, excluded_reason="documentary")
+    repo.save_match("nuisance-bear", None, excluded_reason="documentary")
     lb = FakeLetterboxd(watchlist=[film])
     monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [make_listing(fandango_id="1")])
     _install_fandango(monkeypatch, FakeFandango(showtimes={"1": make_showtime_check(on_sale_theaters=["Roxie Theater"])}))
@@ -601,3 +601,75 @@ def test_run_records_failed_checks_and_unexpected_fandango_data(monkeypatch, rep
 def test_run_flags_fandango_session_failure(monkeypatch, repo):
     monkeypatch.setattr(tracker_module, "FandangoClient", lambda: (_ for _ in ()).throw(Exception("down")))
     assert Tracker(repo, FakeLetterboxd()).run("user", "94158").fandango_unavailable
+
+
+def test_two_listings_are_stored_and_alerted_separately(monkeypatch, repo):
+    """It's a Wonderful Life: Metreon/Bay Street on the 80th Anniversary
+    listing, the Lark on the 1946 listing. Each must be stored and emailed
+    under its own listing and link, with blacklisted theaters left out."""
+    import email_alert
+
+    film = make_film(slug="its-a-wonderful-life", title="It's a Wonderful Life", year=1946)
+    release = LetterboxdRelease(director="Frank Capra", genres=[], poster_url=None, us_dates=[date(1947, 1, 7)])
+    lb = FakeLetterboxd(watchlist=[film], releases={"its-a-wonderful-life": release})
+    anniversary = make_listing(fandango_id="244296", slug="its-a-wonderful-life-80th-anniversary-244296",
+                               title="It's A Wonderful Life 80th Anniversary", year=None)
+    original = make_listing(fandango_id="14197", slug="its-a-wonderful-life-1946-14197", title="It's a Wonderful Life", year=1946)
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [anniversary, original])
+    fandango = FakeFandango(showtimes={
+        "244296": make_showtime_check(on_sale_theaters=["AMC Bay Street 16", "AMC Mercado 20", "AMC Metreon 16"]),
+        "14197": make_showtime_check(on_sale_theaters=["Lark Theater"]),
+    })
+    _install_fandango(monkeypatch, fandango)
+
+    result = Tracker(repo, lb).run("user", "94158", blacklisted_theaters=frozenset({"AMC Mercado 20"}))
+
+    assert film in result.alerted
+    tracked = repo.get("its-a-wonderful-life")
+    assert [(l.slug, l.on_sale_theaters) for l in tracked.listings] == [
+        ("its-a-wonderful-life-80th-anniversary-244296", ["AMC Bay Street 16", "AMC Mercado 20", "AMC Metreon 16"]),
+        ("its-a-wonderful-life-1946-14197", ["Lark Theater"]),
+    ]
+    [pending] = repo.get_unnotified()
+    assert [(l.slug, l.theaters) for l in pending.listings] == [
+        ("its-a-wonderful-life-80th-anniversary-244296", ["AMC Bay Street 16", "AMC Metreon 16"]),
+        ("its-a-wonderful-life-1946-14197", ["Lark Theater"]),
+    ]
+    _, plain_body, _ = email_alert.format_alert(pending)
+    assert "AMC Mercado 20" not in plain_body
+
+
+def test_preferred_search_result_lands_on_the_listing_it_came_from(monkeypatch, repo):
+    film, lb, fandango = _setup_werwulf(monkeypatch, repo, ["Alamo Drafthouse Cinema New Mission"])
+    second = make_listing(fandango_id="2", slug="werwulf-imax-2", title="Werwulf: The IMAX Experience")
+    monkeypatch.setattr(matcher, "find_candidates", lambda *a, **k: [make_listing(fandango_id="1"), second])
+    fandango.later_on_sale["2"] = ["AMC Metreon 16"]
+
+    Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)
+
+    listings = {l.slug: l.on_sale_theaters for l in repo.get("werwulf").listings}
+    assert listings == {"digger-2026-245150": ["Alamo Drafthouse Cinema New Mission"], "werwulf-imax-2": ["AMC Metreon 16"]}
+    [pending] = repo.get_unnotified()
+    assert [(l.slug, l.theaters) for l in pending.listings] == [
+        ("digger-2026-245150", ["Alamo Drafthouse Cinema New Mission"]),
+        ("werwulf-imax-2", ["AMC Metreon 16"]),
+    ]
+
+
+def test_alerts_record_what_can_trigger_the_next_email(monkeypatch, repo):
+    film, lb, fandango = _setup_werwulf(monkeypatch, repo, ["Alamo Drafthouse Cinema New Mission"])
+    Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)
+    [first] = repo.get_unnotified()
+    assert first.context.kind == "first"
+    assert first.context.preferred_missing == ["AMC Kabuki 8", "AMC Metreon 16"]
+    first_alerted_at = repo.get("werwulf").alerted_at
+    repo.mark_notified("werwulf")
+
+    _make_due(repo)
+    fandango.later_on_sale["1"] = ["AMC Metreon 16"]
+    Tracker(repo, lb).run("user", "94158", preferred_theaters=PREFERRED)
+    [upgrade] = repo.get_unnotified()
+    assert upgrade.context.kind == "preferred"
+    assert upgrade.context.preferred_on_sale == ["AMC Metreon 16"]
+    assert upgrade.context.previous_theaters == ["Alamo Drafthouse Cinema New Mission"]
+    assert upgrade.context.previous_alerted_at == first_alerted_at
