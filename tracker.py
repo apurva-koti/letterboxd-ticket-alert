@@ -345,4 +345,5 @@ class Tracker:
         try:
             return self.letterboxd.fetch_list(hype_list_url)
         except Exception:
+            logger.warning("Hype list fetch failed - its films are treated as not on it this run", exc_info=True)
             return []

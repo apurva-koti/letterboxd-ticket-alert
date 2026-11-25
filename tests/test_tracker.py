@@ -673,3 +673,12 @@ def test_alerts_record_what_can_trigger_the_next_email(monkeypatch, repo):
     assert upgrade.context.preferred_on_sale == ["AMC Metreon 16"]
     assert upgrade.context.previous_theaters == ["Alamo Drafthouse Cinema New Mission"]
     assert upgrade.context.previous_alerted_at == first_alerted_at
+
+
+def test_hype_list_failure_is_logged_not_silent(repo, caplog, monkeypatch):
+    lb = FakeLetterboxd()
+    lb.fetch_list = lambda url: (_ for _ in ()).throw(Exception("letterboxd down"))
+    _install_fandango(monkeypatch, FakeFandango())
+    with caplog.at_level("WARNING"):
+        Tracker(repo, lb).run("user", "94158", hype_list_url="https://letterboxd.com/x/list/hype/")
+    assert "Hype list fetch failed" in caplog.text

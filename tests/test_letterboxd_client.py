@@ -122,3 +122,54 @@ def test_get_with_retry_does_not_retry_4xx(monkeypatch):
     resp = lc.LetterboxdClient()._get("https://example.test/x")
     assert resp.status_code == 404
     assert len(calls) == 1
+
+
+END_PAGE = "<html><head><title>dave’s Watchlist • Letterboxd</title></head><body><p>No films</p></body></html>"
+
+
+def test_normal_end_of_watchlist_logs_one_summary_line(monkeypatch, caplog):
+    pages = {1: fake_html_response("letterboxd_watchlist_page1.html"), 2: FakeResponse(text=END_PAGE)}
+    monkeypatch.setattr(lc.requests, "get", lambda url, **kw: pages[int(url.rstrip("/").rsplit("/", 1)[1])])
+    with caplog.at_level("INFO"):
+        films = lc.LetterboxdClient().fetch_watchlist("dave", delay=0)
+
+    assert len(films) == 28
+    assert "Letterboxd watchlist dave: 28 film(s) across 1 page(s); stopped on status=200" in caplog.text
+    assert "WARNING" not in caplog.text
+
+
+def test_empty_watchlist_logs_what_letterboxd_sent(monkeypatch, caplog):
+    """Regression test: on Nov 13 and Nov 25 the watchlist came back with no
+    films and no error, deleting every film - with nothing in the logs to
+    say what Letterboxd had actually returned."""
+    page = "<html><head><title>Letterboxd - Down for maintenance</title></head><body>Back soon</body></html>"
+    monkeypatch.setattr(lc.requests, "get", lambda url, **kw: FakeResponse(text=page))
+    with caplog.at_level("INFO"):
+        films = lc.LetterboxdClient().fetch_watchlist("dave", delay=0)
+
+    assert films == []
+    assert "Letterboxd watchlist dave: 0 film(s) across 0 page(s); stopped on status=200 title='Letterboxd - Down for maintenance'" in caplog.text
+    assert "looks wrong (no films at all): text='Letterboxd - Down for maintenance Back soon'" in caplog.text
+    assert "full body of that last page: <html>" in caplog.text
+
+
+def test_watchlist_ending_on_an_unexpected_page_is_flagged(monkeypatch, caplog):
+    other = "<html><head><title>Just a moment...</title></head><body>Checking your browser</body></html>"
+    pages = {1: fake_html_response("letterboxd_watchlist_page1.html"), 2: FakeResponse(text=other)}
+    monkeypatch.setattr(lc.requests, "get", lambda url, **kw: pages[int(url.rstrip("/").rsplit("/", 1)[1])])
+    with caplog.at_level("INFO"):
+        films = lc.LetterboxdClient().fetch_watchlist("dave", delay=0)
+
+    assert len(films) == 28
+    assert "looks wrong (unexpected last page)" in caplog.text
+    assert "Checking your browser" in caplog.text
+
+
+def test_full_page_is_logged_only_once_per_client(monkeypatch, caplog):
+    monkeypatch.setattr(lc.requests, "get", lambda url, **kw: FakeResponse(text="<html><body>oops</body></html>"))
+    client = lc.LetterboxdClient()
+    with caplog.at_level("WARNING"):
+        client.fetch_watchlist("dave", delay=0)
+        client.fetch_list("https://letterboxd.com/dave/list/hype/", delay=0)
+    assert caplog.text.count("full body of that last page") == 1
+    assert caplog.text.count("looks wrong (no films at all)") == 2

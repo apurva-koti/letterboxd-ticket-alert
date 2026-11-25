@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from datetime import date, datetime
@@ -11,6 +12,8 @@ import requests
 from bs4 import BeautifulSoup
 
 from domain import Film, LetterboxdRelease
+
+logger = logging.getLogger("letterboxd-ticket-alert")
 
 BASE_URL = "https://letterboxd.com"
 HEADERS = {
@@ -30,6 +33,7 @@ GENRE_LINK_RE = re.compile(r'href="/films/genre/([a-z-]+)/"')
 DURATION_RE = re.compile(r'"duration":"((?:[^"\\]|\\.)*)"')
 ISO_DURATION_RE = re.compile(r"PT(?:(\d+)H)?(?:(\d+)M)?")
 US_RELEASE_SECTIONS = ("Theatrical", "Theatrical limited")
+TEXT_SNIPPET_LENGTH = 1000
 
 
 def pick_anchor(dates: list[date], today: date | None = None) -> date | None:
@@ -43,6 +47,34 @@ def pick_anchor(dates: list[date], today: date | None = None) -> date | None:
 
 
 class LetterboxdClient:
+    def __init__(self) -> None:
+        self._logged_full_page = False
+
+    def _log_list_fetch(
+        self, what: str, films: list[Film], pages: int, stop: requests.Response, ok_statuses: set[int], title_has: str
+    ) -> None:
+        """One line per list fetch saying how it ended, so a watchlist that
+        comes back short or empty can be told apart from a real one
+        (confirmed in production: on Nov 13 and Nov 25 the watchlist came
+        back with no films and no error, and every film on it was deleted).
+        A suspicious ending also logs what Letterboxd actually sent."""
+        soup = BeautifulSoup(stop.text, "html.parser")
+        title = soup.title.get_text(strip=True) if soup.title else None
+        normal_stop = stop.status_code in ok_statuses and (stop.status_code != 200 or title_has in (title or ""))
+        summary = (
+            f"Letterboxd {what}: {len(films)} film(s) across {pages} page(s); "
+            f"stopped on status={stop.status_code} title={title!r} length={len(stop.text)}"
+        )
+        if films and normal_stop:
+            logger.info(summary)
+            return
+        text = " ".join(soup.get_text(" ", strip=True).split())[:TEXT_SNIPPET_LENGTH]
+        logger.warning(f"{summary} - looks wrong ({'no films at all' if not films else 'unexpected last page'}): text={text!r}")
+        # Full page once per run - enough to see what it was.
+        if not getattr(self, "_logged_full_page", False):
+            self._logged_full_page = True
+            logger.warning(f"Letterboxd {what}: full body of that last page: {stop.text}")
+
     def _get(self, url: str, **kwargs) -> requests.Response:
         kwargs.setdefault("headers", HEADERS)
         kwargs.setdefault("timeout", 15)
@@ -79,6 +111,9 @@ class LetterboxdClient:
             if max_pages and page > max_pages:
                 break
             time.sleep(delay)
+        # Past the last page Letterboxd normally serves the same watchlist
+        # page with no films (status 200, "<user>'s Watchlist • Letterboxd").
+        self._log_list_fetch(f"watchlist {username}", films, page - 1, resp, {200}, title_has="Watchlist")
         return films
 
     def fetch_list(self, list_url: str, delay: float = 0.5, max_pages: int | None = None) -> list[Film]:
@@ -114,6 +149,9 @@ class LetterboxdClient:
             if max_pages and page > max_pages:
                 break
             time.sleep(delay)
+        # A share link 403s past page 1, which is a normal end there.
+        ok = {200, 403} if page > 1 else {200}
+        self._log_list_fetch(f"list {base}", films, page - 1, resp, ok, title_has="Letterboxd")
         return films
 
     def fetch_release(self, slug: str) -> LetterboxdRelease:
