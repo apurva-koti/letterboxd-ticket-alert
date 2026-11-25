@@ -83,9 +83,11 @@ class Tracker:
 
         watchlist = self._fetch_watchlist(username)
         hype_films = self._fetch_hype_list(hype_list_url)
-        hype_slugs = {f.slug for f in hype_films}
+        hype_slugs = {f.slug for f in hype_films or []}
 
-        if watchlist is not None:
+        # Sync only when both lists loaded - a failed Hype list would
+        # otherwise remove every film that's only on it.
+        if watchlist is not None and hype_films is not None:
             by_slug = {f.slug: f for f in watchlist}
             for f in hype_films:
                 by_slug.setdefault(f.slug, f)
@@ -339,11 +341,12 @@ class Tracker:
             logger.warning("Watchlist fetch failed - skipping resync this run", exc_info=True)
             return None
 
-    def _fetch_hype_list(self, hype_list_url: str | None) -> list[Film]:
+    def _fetch_hype_list(self, hype_list_url: str | None) -> list[Film] | None:
+        """None if the fetch failed (as opposed to an empty Hype list)."""
         if not hype_list_url:
             return []
         try:
             return self.letterboxd.fetch_list(hype_list_url)
         except Exception:
-            logger.warning("Hype list fetch failed - its films are treated as not on it this run", exc_info=True)
-            return []
+            logger.warning("Hype list fetch failed - skipping the watchlist sync this run", exc_info=True)
+            return None

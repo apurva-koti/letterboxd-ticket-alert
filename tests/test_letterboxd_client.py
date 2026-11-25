@@ -138,38 +138,107 @@ def test_normal_end_of_watchlist_logs_one_summary_line(monkeypatch, caplog):
     assert "WARNING" not in caplog.text
 
 
-def test_empty_watchlist_logs_what_letterboxd_sent(monkeypatch, caplog):
+import pytest
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    monkeypatch.setattr(lc.time, "sleep", lambda s: None)
+
+
+def _route(pages):
+    """fake requests.get serving {page number: response} for watchlist URLs."""
+    return lambda url, **kw: pages[int(url.rstrip("/").rsplit("/", 1)[1])]
+
+
+CHALLENGE = FakeResponse(
+    text="<html><head><title>Just a moment...</title></head><body>Enable JavaScript and cookies to continue</body></html>",
+    status_code=403,
+)
+CHALLENGE.headers = {"cf-mitigated": "challenge"}
+
+
+def test_watchlist_page_that_isnt_a_watchlist_raises_and_logs_it(monkeypatch, caplog, no_sleep):
     """Regression test: on Nov 13 and Nov 25 the watchlist came back with no
-    films and no error, deleting every film - with nothing in the logs to
-    say what Letterboxd had actually returned."""
+    films and no error, and the sync deleted every film. A page with no
+    films that isn't a real watchlist page must fail the fetch instead."""
     page = "<html><head><title>Letterboxd - Down for maintenance</title></head><body>Back soon</body></html>"
     monkeypatch.setattr(lc.requests, "get", lambda url, **kw: FakeResponse(text=page))
-    with caplog.at_level("INFO"):
-        films = lc.LetterboxdClient().fetch_watchlist("dave", delay=0)
-
-    assert films == []
-    assert "Letterboxd watchlist dave: 0 film(s) across 0 page(s); stopped on status=200 title='Letterboxd - Down for maintenance'" in caplog.text
-    assert "looks wrong (no films at all): text='Letterboxd - Down for maintenance Back soon'" in caplog.text
+    with caplog.at_level("INFO"), pytest.raises(lc.LetterboxdPageError, match="isn't a watchlist page"):
+        lc.LetterboxdClient().fetch_watchlist("dave", delay=0)
+    assert "title='Letterboxd - Down for maintenance'" in caplog.text
+    assert "text='Letterboxd - Down for maintenance Back soon'" in caplog.text
     assert "full body of that last page: <html>" in caplog.text
 
 
-def test_watchlist_ending_on_an_unexpected_page_is_flagged(monkeypatch, caplog):
-    other = "<html><head><title>Just a moment...</title></head><body>Checking your browser</body></html>"
-    pages = {1: fake_html_response("letterboxd_watchlist_page1.html"), 2: FakeResponse(text=other)}
-    monkeypatch.setattr(lc.requests, "get", lambda url, **kw: pages[int(url.rstrip("/").rsplit("/", 1)[1])])
-    with caplog.at_level("INFO"):
+def test_unexpected_page_mid_watchlist_raises_instead_of_truncating(monkeypatch, no_sleep):
+    other = FakeResponse(text="<html><head><title>Error</title></head><body>Something went wrong</body></html>")
+    monkeypatch.setattr(lc.requests, "get", _route({1: fake_html_response("letterboxd_watchlist_page1.html"), 2: other}))
+    with pytest.raises(lc.LetterboxdPageError):
+        lc.LetterboxdClient().fetch_watchlist("dave", delay=0)
+
+
+def test_genuinely_empty_watchlist_is_allowed(monkeypatch, no_sleep):
+    monkeypatch.setattr(lc.requests, "get", lambda url, **kw: FakeResponse(text=END_PAGE))
+    assert lc.LetterboxdClient().fetch_watchlist("dave", delay=0) == []
+
+
+def test_watchlist_404_on_page_one_raises(monkeypatch, no_sleep):
+    monkeypatch.setattr(lc.requests, "get", lambda url, **kw: FakeResponse(text="<html><title>Not found</title></html>", status_code=404))
+    with pytest.raises(lc.LetterboxdPageError, match="404 on page 1"):
+        lc.LetterboxdClient().fetch_watchlist("dave", delay=0)
+
+
+def test_cloudflare_check_is_retried_with_backoff_then_passes(monkeypatch, caplog):
+    sleeps = []
+    monkeypatch.setattr(lc.time, "sleep", sleeps.append)
+    responses = iter([CHALLENGE, fake_html_response("letterboxd_watchlist_page1.html"), FakeResponse(text=END_PAGE)])
+    monkeypatch.setattr(lc.requests, "get", lambda url, **kw: next(responses))
+    with caplog.at_level("WARNING"):
         films = lc.LetterboxdClient().fetch_watchlist("dave", delay=0)
-
     assert len(films) == 28
-    assert "looks wrong (unexpected last page)" in caplog.text
-    assert "Checking your browser" in caplog.text
+    assert "Letterboxd Cloudflare check (attempt 1/3)" in caplog.text
+    assert sleeps[0] == lc.RETRY_BASE_DELAY_SECONDS
 
 
-def test_full_page_is_logged_only_once_per_client(monkeypatch, caplog):
+def test_cloudflare_check_that_never_clears_raises(monkeypatch, caplog, no_sleep):
+    calls = []
+    monkeypatch.setattr(lc.requests, "get", lambda url, **kw: calls.append(url) or CHALLENGE)
+    with caplog.at_level("WARNING"), pytest.raises(lc.LetterboxdPageError, match="Cloudflare check"):
+        lc.LetterboxdClient().fetch_watchlist("dave", delay=0)
+    assert len(calls) == lc.RETRY_ATTEMPTS
+    assert "Enable JavaScript and cookies to continue" in caplog.text
+
+
+def test_hype_list_cloudflare_check_on_page_one_raises(monkeypatch, no_sleep):
+    """Seen live: the Hype share link got Cloudflare's check (403) - the old
+    code read that as an empty Hype list."""
+    monkeypatch.setattr(lc.requests, "get", lambda url, **kw: CHALLENGE)
+    with pytest.raises(lc.LetterboxdPageError, match="Cloudflare check"):
+        lc.LetterboxdClient().fetch_list("https://letterboxd.com/dave/list/hype/share/tok123/")
+
+
+def test_hype_list_plain_403_on_page_one_raises(monkeypatch, no_sleep):
+    monkeypatch.setattr(lc.requests, "get", lambda url, **kw: FakeResponse(text="<html><title>Forbidden</title></html>", status_code=403))
+    with pytest.raises(lc.LetterboxdPageError, match="403 on page 1"):
+        lc.LetterboxdClient().fetch_list("https://letterboxd.com/dave/list/hype/share/tok123/")
+
+
+def test_share_link_plain_403_past_page_one_is_still_a_normal_end(monkeypatch, no_sleep):
+    def get(url, **kw):
+        if url.endswith("/tok123/"):
+            return fake_html_response("letterboxd_watchlist_page1.html")
+        return FakeResponse(text="<html><title>Forbidden</title></html>", status_code=403)
+
+    monkeypatch.setattr(lc.requests, "get", get)
+    assert len(lc.LetterboxdClient().fetch_list("https://letterboxd.com/dave/list/hype/share/tok123/")) == 28
+
+
+def test_full_page_is_logged_only_once_per_client(monkeypatch, caplog, no_sleep):
     monkeypatch.setattr(lc.requests, "get", lambda url, **kw: FakeResponse(text="<html><body>oops</body></html>"))
     client = lc.LetterboxdClient()
     with caplog.at_level("WARNING"):
-        client.fetch_watchlist("dave", delay=0)
-        client.fetch_list("https://letterboxd.com/dave/list/hype/", delay=0)
+        for fetch in (lambda: client.fetch_watchlist("dave", delay=0), lambda: client.fetch_list("https://letterboxd.com/dave/list/hype/", delay=0)):
+            with pytest.raises(lc.LetterboxdPageError):
+                fetch()
     assert caplog.text.count("full body of that last page") == 1
-    assert caplog.text.count("looks wrong (no films at all)") == 2

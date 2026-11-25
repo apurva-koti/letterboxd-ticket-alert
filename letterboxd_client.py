@@ -34,6 +34,30 @@ DURATION_RE = re.compile(r'"duration":"((?:[^"\\]|\\.)*)"')
 ISO_DURATION_RE = re.compile(r"PT(?:(\d+)H)?(?:(\d+)M)?")
 US_RELEASE_SECTIONS = ("Theatrical", "Theatrical limited")
 TEXT_SNIPPET_LENGTH = 1000
+CLOUDFLARE_CHALLENGE_TITLE = "Just a moment..."
+
+
+class LetterboxdPageError(Exception):
+    """A list or watchlist page that isn't what it should be - a Cloudflare
+    check, a 404, or a page with no films that isn't a real watchlist/list
+    page. Raised instead of returning a short or empty list, which the
+    watchlist sync would take as "these films were removed" and delete them
+    (confirmed in production: Nov 13 and Nov 25, every film deleted and
+    re-alerted)."""
+
+
+def _is_cloudflare_challenge(resp: requests.Response) -> bool:
+    """Cloudflare's bot check: `cf-mitigated: challenge` and a "Just a
+    moment..." page (confirmed live on the Hype share link, as a 403). Not
+    the text "challenge-platform" - normal Letterboxd pages contain it too."""
+    if (getattr(resp, "headers", None) or {}).get("cf-mitigated") == "challenge":
+        return True
+    return f"<title>{CLOUDFLARE_CHALLENGE_TITLE}</title>" in (resp.text or "")[:3000]
+
+
+def _page_title(resp: requests.Response) -> str:
+    soup = BeautifulSoup(resp.text, "html.parser")
+    return soup.title.get_text(strip=True) if soup.title else ""
 
 
 def pick_anchor(dates: list[date], today: date | None = None) -> date | None:
@@ -75,6 +99,10 @@ class LetterboxdClient:
             self._logged_full_page = True
             logger.warning(f"Letterboxd {what}: full body of that last page: {stop.text}")
 
+    def _fail(self, what: str, films: list[Film], pages: int, resp: requests.Response, reason: str) -> None:
+        self._log_list_fetch(what, films, pages, resp, ok_statuses=set(), title_has="")
+        raise LetterboxdPageError(f"Letterboxd {what}: {reason} (status={resp.status_code} title={_page_title(resp)!r})")
+
     def _get(self, url: str, **kwargs) -> requests.Response:
         kwargs.setdefault("headers", HEADERS)
         kwargs.setdefault("timeout", 15)
@@ -83,7 +111,11 @@ class LetterboxdClient:
             try:
                 resp = requests.get(url, **kwargs)
                 last_exc = None
-                if resp.status_code < 500:
+                if _is_cloudflare_challenge(resp):
+                    logger.warning(
+                        f"Letterboxd Cloudflare check (attempt {attempt + 1}/{RETRY_ATTEMPTS}) {url}: status={resp.status_code}"
+                    )
+                elif resp.status_code < 500:
                     return resp
             except requests.exceptions.RequestException as e:
                 last_exc, resp = e, None
@@ -96,14 +128,23 @@ class LetterboxdClient:
     def fetch_watchlist(self, username: str, delay: float = 0.5, max_pages: int | None = None) -> list[Film]:
         films: list[Film] = []
         page = 1
+        what = f"watchlist {username}"
         while True:
             resp = self._get(f"{BASE_URL}/{username}/watchlist/page/{page}/")
+            if _is_cloudflare_challenge(resp):
+                self._fail(what, films, page - 1, resp, "Cloudflare check")
             if resp.status_code == 404:
+                if page == 1:
+                    self._fail(what, films, 0, resp, "404 on page 1")
                 break
             resp.raise_for_status()
 
             page_films = _parse_page(resp.text)
             if not page_films:
+                # Past the last page Letterboxd serves the watchlist page
+                # itself with no films; anything else is not a real end.
+                if "Watchlist" not in _page_title(resp):
+                    self._fail(what, films, page - 1, resp, "page with no films that isn't a watchlist page")
                 break
             films.extend(page_films)
 
@@ -128,15 +169,22 @@ class LetterboxdClient:
             url = f"{base}/" if page == 1 else f"{base}/page/{page}/"
             resp = self._get(url)
 
-            if resp.status_code == 403 and page > 1:
+            if resp.status_code == 403 and page > 1 and not _is_cloudflare_challenge(resp):
                 resp = self._get(f"{base}/?page={page}")
 
+            what = f"list {base}"
+            if _is_cloudflare_challenge(resp):
+                self._fail(what, films, page - 1, resp, "Cloudflare check")
             if resp.status_code in (403, 404):
-                break
+                if page == 1:
+                    self._fail(what, films, 0, resp, f"{resp.status_code} on page 1")
+                break  # a share link 403s past page 1 - a normal end
             resp.raise_for_status()
 
             page_films = _parse_page(resp.text)
             if not page_films:
+                if page == 1 and "Letterboxd" not in _page_title(resp):
+                    self._fail(what, films, 0, resp, "page with no films that isn't a Letterboxd list page")
                 break
 
             page_slugs = {f.slug for f in page_films}

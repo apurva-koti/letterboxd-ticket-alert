@@ -681,4 +681,37 @@ def test_hype_list_failure_is_logged_not_silent(repo, caplog, monkeypatch):
     _install_fandango(monkeypatch, FakeFandango())
     with caplog.at_level("WARNING"):
         Tracker(repo, lb).run("user", "94158", hype_list_url="https://letterboxd.com/x/list/hype/")
-    assert "Hype list fetch failed" in caplog.text
+    assert "Hype list fetch failed - skipping the watchlist sync this run" in caplog.text
+
+
+def test_failed_hype_list_doesnt_remove_hype_only_films(monkeypatch, repo):
+    hype_only = make_film(slug="dune-part-three", title="Dune: Part Three")
+    on_watchlist = make_film(slug="werwulf", title="Werwulf")
+    repo.sync_watchlist([hype_only, on_watchlist])
+    lb = FakeLetterboxd(watchlist=[on_watchlist])
+    lb.fetch_list = lambda url: (_ for _ in ()).throw(Exception("Cloudflare check"))
+    _install_fandango(monkeypatch, FakeFandango())
+
+    result = Tracker(repo, lb).run("user", "94158", hype_list_url="https://letterboxd.com/x/list/hype/")
+
+    assert result.removed == []
+    assert repo.get("dune-part-three") is not None
+
+
+def test_failed_watchlist_fetch_deletes_nothing(monkeypatch, repo):
+    """Regression test for the Nov 13 / Nov 25 wipes: a bad Letterboxd
+    response must skip the sync, not remove every film."""
+    import letterboxd_client
+
+    films = [make_film(slug=f"film-{i}", title=f"Film {i}") for i in range(5)]
+    repo.sync_watchlist(films)
+    lb = FakeLetterboxd(watchlist=films)
+    lb.fetch_watchlist = lambda username: (_ for _ in ()).throw(
+        letterboxd_client.LetterboxdPageError("Letterboxd watchlist user: Cloudflare check (status=403 title='Just a moment...')")
+    )
+    _install_fandango(monkeypatch, FakeFandango())
+
+    result = Tracker(repo, lb).run("user", "94158")
+
+    assert result.removed == []
+    assert len(repo.all_films()) == 5
