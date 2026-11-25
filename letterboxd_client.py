@@ -133,10 +133,12 @@ class LetterboxdClient:
             resp = self._get(f"{BASE_URL}/{username}/watchlist/page/{page}/")
             if _is_cloudflare_challenge(resp):
                 self._fail(what, films, page - 1, resp, "Cloudflare check")
+            # Past the last page Letterboxd returns 200 with no films (checked
+            # live), never 404 - so a 404 on any page is an error, not the end
+            # (Nov 25: the fetch stopped after page 2, the sync kept 56 of 271
+            # films and deleted the rest).
             if resp.status_code == 404:
-                if page == 1:
-                    self._fail(what, films, 0, resp, "404 on page 1")
-                break
+                self._fail(what, films, page - 1, resp, f"404 on page {page}")
             resp.raise_for_status()
 
             page_films = _parse_page(resp.text)

@@ -189,6 +189,16 @@ def test_watchlist_404_on_page_one_raises(monkeypatch, no_sleep):
         lc.LetterboxdClient().fetch_watchlist("dave", delay=0)
 
 
+def test_watchlist_404_after_some_pages_raises_instead_of_truncating(monkeypatch, no_sleep):
+    """Regression test for Nov 25: the fetch stopped after page 2, and the
+    sync kept 56 of 271 films and deleted the other 215."""
+    not_found = FakeResponse(text="<html><title>Not found</title></html>", status_code=404)
+    page = fake_html_response("letterboxd_watchlist_page1.html")
+    monkeypatch.setattr(lc.requests, "get", _route({1: page, 2: page, 3: not_found}))
+    with pytest.raises(lc.LetterboxdPageError, match="404 on page 3"):
+        lc.LetterboxdClient().fetch_watchlist("dave", delay=0)
+
+
 def test_cloudflare_check_is_retried_with_backoff_then_passes(monkeypatch, caplog):
     sleeps = []
     monkeypatch.setattr(lc.time, "sleep", sleeps.append)
