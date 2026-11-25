@@ -2,6 +2,8 @@ import requests
 
 import modal_app
 
+from conftest import make_film
+
 
 def _http_error(status_code):
     response = requests.Response()
@@ -70,3 +72,27 @@ def test_check_health_retries_the_email_if_sending_fails(monkeypatch):
     repo, broken, now, sent = _health_setup(monkeypatch, fail)
     modal_app._check_health(repo, broken, now, None)
     assert repo.get_health().alerted_at is None  # not marked sent - next run tries again
+
+
+def test_check_health_tracks_letterboxd_separately_from_fandango(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from domain import RunResult
+    from health import HealthState
+    from repository import FilmRepository
+
+    import email_alert
+
+    sent = []
+    monkeypatch.setattr(email_alert, "send_email", lambda subject, body, html=None: sent.append(subject))
+    repo = FilmRepository.connect(":memory:")
+    t0 = datetime(2026, 11, 25, 9, 0, tzinfo=timezone.utc)
+    repo.save_health(HealthState(failing_since=t0, last_problem="watchlist: 404 on page 3"), "letterboxd")
+
+    # Fandango checks fine, Letterboxd still failing 6h later: only the Letterboxd email.
+    result = RunResult(checked=[make_film()], letterboxd_problems=["watchlist: LetterboxdPageError: 404 on page 3"])
+    modal_app._check_health(repo, result, t0 + timedelta(hours=6), None)
+
+    assert sent == ["⚠️ Ticket alerts: your Letterboxd lists aren't loading"]
+    assert repo.get_health("fandango") == HealthState()
+    assert repo.get_health("letterboxd").alerted_at == t0 + timedelta(hours=6)

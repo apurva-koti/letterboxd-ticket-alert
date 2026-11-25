@@ -217,6 +217,11 @@ Runs every 15 minutes, so tolerating flaky sites matters:
   checked.
 - Only actionable failures email you - a timeout or 5xx that self-heals on
   its own doesn't.
+- If your Letterboxd watchlist or Hype list doesn't load (Cloudflare's bot
+  check that doesn't clear after retries, a 404, or a page that isn't a
+  real list), the watchlist sync is skipped for that run - a short or
+  empty list is never taken as "these films were removed". After 6 hours
+  of that you get an email, separate from the Fandango one below.
 - If Fandango checking stays broken for 6 hours - every film check failing,
   no Fandango session, or Fandango sending showtime data the code doesn't
   recognize - you get one email saying so (with the log file to look at),

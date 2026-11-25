@@ -262,3 +262,24 @@ def test_health_state_round_trips_and_starts_empty():
     assert repo.get_health() == state
     repo.save_health(HealthState())
     assert repo.get_health() == HealthState()
+
+
+def test_health_is_kept_per_source_and_the_old_fandango_row_carries_over(tmp_path):
+    from datetime import datetime, timezone
+
+    from health import HealthState
+
+    db = tmp_path / "state.db"
+    r = FilmRepository.connect(str(db))
+    since = datetime(2026, 11, 3, 7, 45, tzinfo=timezone.utc)
+    r.conn.execute("DELETE FROM source_health")
+    r.conn.execute("INSERT INTO health (id, failing_since, last_problem) VALUES (1, ?, 'old fandango problem')", (since.isoformat(),))
+    r.conn.commit()
+
+    r = FilmRepository.connect(str(db))  # reconnect runs the carry-over
+    assert r.get_health("fandango") == HealthState(failing_since=since, last_problem="old fandango problem")
+    assert r.get_health("letterboxd") == HealthState()
+
+    r.save_health(HealthState(failing_since=since, last_problem="watchlist down"), "letterboxd")
+    assert r.get_health("letterboxd").last_problem == "watchlist down"
+    assert r.get_health("fandango").last_problem == "old fandango problem"

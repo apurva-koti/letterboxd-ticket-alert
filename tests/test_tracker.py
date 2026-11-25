@@ -715,3 +715,11 @@ def test_failed_watchlist_fetch_deletes_nothing(monkeypatch, repo):
 
     assert result.removed == []
     assert len(repo.all_films()) == 5
+
+
+def test_run_records_letterboxd_list_failures(monkeypatch, repo):
+    lb = FakeLetterboxd(fail_watchlist=True)
+    lb.fetch_list = lambda url: (_ for _ in ()).throw(Exception("Cloudflare check"))
+    _install_fandango(monkeypatch, FakeFandango())
+    result = Tracker(repo, lb).run("user", "94158", hype_list_url="https://letterboxd.com/x/list/hype/")
+    assert result.letterboxd_problems == ["watchlist: Exception: boom", "Hype list: Exception: Cloudflare check"]

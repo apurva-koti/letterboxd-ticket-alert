@@ -1,8 +1,16 @@
-"""Emails once when Fandango checking has been broken for a while - so a
-Fandango restyle or a persistent block shows up within hours instead of
-as weeks of silently missed alerts. Every failure mode it watches for was
-otherwise just a warning in the logs.
+"""Emails once when Fandango checking, or loading your Letterboxd lists,
+has been broken for a while - so a site redesign or a persistent block
+shows up within hours instead of as weeks of silently missed alerts. Every
+failure mode it watches for was otherwise just a warning in the logs.
 
+Each source has its own timer, so a working Fandango run can't reset a
+Letterboxd failure or the other way round.
+
+Letterboxd is BROKEN when the watchlist or Hype list didn't load (the sync
+is skipped then: new films aren't picked up, and nothing is removed), OK
+when both loaded.
+
+Fandango:
 A run is BROKEN when Fandango couldn't be used at all: the session
 failed, every film check failed, or Fandango sent a showtime type the code
 doesn't recognize (a rename of "available" would otherwise make nothing
@@ -23,6 +31,29 @@ from enum import StrEnum
 from domain import RunResult
 
 BROKEN_ALERT_AFTER = timedelta(hours=6)
+
+
+class Source(StrEnum):
+    FANDANGO = "fandango"
+    LETTERBOXD = "letterboxd"
+
+
+BROKEN_SUBJECTS = {
+    Source.FANDANGO: "⚠️ Ticket alerts: Fandango checks failing - you may be missing alerts",
+    Source.LETTERBOXD: "⚠️ Ticket alerts: your Letterboxd lists aren't loading",
+}
+BROKEN_EXPLANATIONS = {
+    Source.FANDANGO: "failed to check films on Fandango, so no ticket alerts can fire.",
+    Source.LETTERBOXD: (
+        "failed to load your Letterboxd watchlist or Hype list. Films already tracked are still checked, "
+        "but films you've added since aren't picked up, and films with no release date, retired films and "
+        "Hype films can't be checked (they re-read Letterboxd first)."
+    ),
+}
+RECOVERED_SUBJECTS = {
+    Source.FANDANGO: "✅ Ticket alerts: Fandango checks working again",
+    Source.LETTERBOXD: "✅ Ticket alerts: your Letterboxd lists are loading again",
+}
 
 
 class RunHealth(StrEnum):
@@ -57,8 +88,19 @@ def assess(result: RunResult) -> tuple[RunHealth, str | None]:
     return RunHealth.NO_SIGNAL, None
 
 
+def assess_letterboxd(result: RunResult) -> tuple[RunHealth, str | None]:
+    if result.letterboxd_problems:
+        return RunHealth.BROKEN, "; ".join(result.letterboxd_problems)
+    return RunHealth.OK, None
+
+
 def update(
-    state: HealthState, health: RunHealth, problem: str | None, now: datetime, log_file: str | None
+    state: HealthState,
+    health: RunHealth,
+    problem: str | None,
+    now: datetime,
+    log_file: str | None,
+    source: Source = Source.FANDANGO,
 ) -> tuple[HealthState, HealthEmail | None]:
     """The new state, and the email to send this run, if any."""
     if health == RunHealth.NO_SIGNAL:
@@ -68,11 +110,10 @@ def update(
         email = None
         if state.alerted_at:
             email = HealthEmail(
-                subject="✅ Ticket alerts: Fandango checks working again",
+                subject=RECOVERED_SUBJECTS[source],
                 body=(
-                    f"Film checks are succeeding again as of {now:%Y-%m-%d %H:%M} UTC, after failing since "
-                    f"{state.failing_since:%Y-%m-%d %H:%M} UTC.\n\nLast problem: {state.last_problem}\n\n"
-                    "Films that were due during the outage are being checked now."
+                    f"Working again as of {now:%Y-%m-%d %H:%M} UTC, after failing since "
+                    f"{state.failing_since:%Y-%m-%d %H:%M} UTC.\n\nLast problem: {state.last_problem}"
                 ),
             )
         return HealthState(), email
@@ -83,13 +124,13 @@ def update(
         new_state.alerted_at = now
         hours = (now - failing_since).total_seconds() / 3600
         return new_state, HealthEmail(
-            subject="⚠️ Ticket alerts: Fandango checks failing - you may be missing alerts",
+            subject=BROKEN_SUBJECTS[source],
             body=(
-                f"Every run since {failing_since:%Y-%m-%d %H:%M} UTC (~{hours:.0f}h) has failed to check films "
-                f"on Fandango, so no ticket alerts can fire.\n\nLatest problem: {problem}\n\n"
+                f"Every run since {failing_since:%Y-%m-%d %H:%M} UTC (~{hours:.0f}h) has {BROKEN_EXPLANATIONS[source]}"
+                f"\n\nLatest problem: {problem}\n\n"
                 f"This run's log: {log_file or '(not saved)'} on the letterboxd-ticket-alert-db Volume - "
-                "it includes the page or data Fandango returned.\n\n"
-                "You'll get one more email when checks work again."
+                "it includes the page or data that came back.\n\n"
+                "You'll get one more email when it works again."
             ),
         )
     return new_state, None

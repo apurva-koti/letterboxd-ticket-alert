@@ -174,29 +174,33 @@ def _run_scheduler(now, log_file: str | None) -> None:
 
 
 def _check_health(repo, result, now, log_file: str | None) -> None:
-    """One email when Fandango checking has been broken 6h+, one when it
-    recovers - see health.py. Never fails the run itself."""
+    """Per source (Fandango, Letterboxd): one email when it's been broken
+    6h+, one when it recovers - see health.py. Never fails the run itself."""
     import email_alert
     import health
 
-    try:
-        state = repo.get_health()
-        run_health, problem = health.assess(result)
-        new_state, email = health.update(state, run_health, problem, now, log_file)
-        if run_health != health.RunHealth.NO_SIGNAL:
-            logger.info(f"Health: {run_health}{' - ' + problem if problem else ''} (failing since {new_state.failing_since})")
-        if email:
-            try:
-                email_alert.send_email(email.subject, email.body)
-                logger.info(f"Health email sent: {email.subject}")
-            except Exception:
-                logger.exception("Health email failed - will retry next run")
-                new_state.alerted_at = state.alerted_at
-                if run_health == health.RunHealth.OK:
-                    return  # keep the broken state so the recovery email is retried
-        repo.save_health(new_state)
-    except Exception:
-        logger.exception("Health check failed")
+    for source, assess in ((health.Source.FANDANGO, health.assess), (health.Source.LETTERBOXD, health.assess_letterboxd)):
+        try:
+            state = repo.get_health(source)
+            run_health, problem = assess(result)
+            new_state, email = health.update(state, run_health, problem, now, log_file, source)
+            if run_health != health.RunHealth.NO_SIGNAL:
+                logger.info(
+                    f"Health ({source}): {run_health}{' - ' + problem if problem else ''} "
+                    f"(failing since {new_state.failing_since})"
+                )
+            if email:
+                try:
+                    email_alert.send_email(email.subject, email.body)
+                    logger.info(f"Health email sent: {email.subject}")
+                except Exception:
+                    logger.exception("Health email failed - will retry next run")
+                    new_state.alerted_at = state.alerted_at
+                    if run_health == health.RunHealth.OK:
+                        continue  # keep the broken state so the recovery email is retried
+            repo.save_health(new_state, source)
+        except Exception:
+            logger.exception(f"Health check failed ({source})")
 
 
 @app.function(image=image, volumes={"/data": volume}, secrets=[config_ui_secret], region="us")

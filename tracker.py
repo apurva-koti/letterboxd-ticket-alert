@@ -81,8 +81,8 @@ class Tracker:
 
         fandango = self._new_fandango_session()
 
-        watchlist = self._fetch_watchlist(username)
-        hype_films = self._fetch_hype_list(hype_list_url)
+        watchlist = self._fetch_watchlist(username, result)
+        hype_films = self._fetch_hype_list(hype_list_url, result)
         hype_slugs = {f.slug for f in hype_films or []}
 
         # Sync only when both lists loaded - a failed Hype list would
@@ -334,19 +334,21 @@ class Tracker:
             logger.warning("Fandango session failed - skipping ticket checks this run", exc_info=True)
             return None
 
-    def _fetch_watchlist(self, username: str) -> list[Film] | None:
+    def _fetch_watchlist(self, username: str, result: RunResult) -> list[Film] | None:
         try:
             return self.letterboxd.fetch_watchlist(username)
-        except Exception:
+        except Exception as e:
             logger.warning("Watchlist fetch failed - skipping resync this run", exc_info=True)
+            result.letterboxd_problems.append(f"watchlist: {type(e).__name__}: {e}")
             return None
 
-    def _fetch_hype_list(self, hype_list_url: str | None) -> list[Film] | None:
+    def _fetch_hype_list(self, hype_list_url: str | None, result: RunResult) -> list[Film] | None:
         """None if the fetch failed (as opposed to an empty Hype list)."""
         if not hype_list_url:
             return []
         try:
             return self.letterboxd.fetch_list(hype_list_url)
-        except Exception:
+        except Exception as e:
             logger.warning("Hype list fetch failed - skipping the watchlist sync this run", exc_info=True)
+            result.letterboxd_problems.append(f"Hype list: {type(e).__name__}: {e}")
             return None

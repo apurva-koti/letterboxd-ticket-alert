@@ -84,3 +84,25 @@ def test_no_signal_runs_dont_reset_or_extend_the_state():
     state, _ = _run_for(2)
     same, email = health.update(state, RunHealth.NO_SIGNAL, None, T0 + timedelta(hours=3), None)
     assert same == state and email is None
+
+
+def test_letterboxd_list_failure_is_broken_and_loaded_lists_are_ok():
+    failed = RunResult(letterboxd_problems=["watchlist: LetterboxdPageError: Cloudflare check"])
+    assert health.assess_letterboxd(failed) == (RunHealth.BROKEN, "watchlist: LetterboxdPageError: Cloudflare check")
+    assert health.assess_letterboxd(RunResult()) == (RunHealth.OK, None)
+
+
+def test_letterboxd_email_after_six_hours_says_what_isnt_working():
+    state, emails, now = HealthState(), [], T0
+    while now <= T0 + timedelta(hours=7):
+        state, email = health.update(state, RunHealth.BROKEN, "watchlist: 404 on page 3", now, "logs/x.log", health.Source.LETTERBOXD)
+        if email:
+            emails.append(email)
+        now += timedelta(minutes=15)
+    [email] = emails
+    assert email.subject == "⚠️ Ticket alerts: your Letterboxd lists aren't loading"
+    assert "films you've added since aren't picked up" in email.body
+    assert "watchlist: 404 on page 3" in email.body
+
+    _, recovered = health.update(state, RunHealth.OK, None, now, None, health.Source.LETTERBOXD)
+    assert recovered.subject == "✅ Ticket alerts: your Letterboxd lists are loading again"
